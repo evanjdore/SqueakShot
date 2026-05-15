@@ -1,0 +1,19 @@
+[Unit]
+Description=SqueakShot camera preview MJPEG server
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=/home/__USER__
+ExecStart=/usr/bin/python3 /home/__USER__/camera_preview.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Make sure the record service is not running at the same time
+Conflicts=squeakshot-record.service
+
+[Install]
+WantedBy=multi-user.target

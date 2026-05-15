@@ -1,0 +1,32 @@
+{
+  "cameras": [
+    {
+      "name": "cam0",
+      "ip": "155.58.220.227",
+      "user": "maiya",
+      "role": "server"
+    },
+    {
+      "name": "cam1",
+      "ip": "155.58.220.226",
+      "user": "maiya",
+      "role": "client"
+    },
+    {
+      "name": "cam2",
+      "ip": "",
+      "user": "maiya",
+      "role": "client"
+    }
+  ],
+  "video_dir": "/home/maiya/camera_videos",
+  "local_video_dir": "~/SqueakShot_Videos",
+  "camera_settings": {
+    "output_width": 1536,
+    "output_height": 864,
+    "sensor_width": 2304,
+    "sensor_height": 1296,
+    "framerate": 56,
+    "bitrate_mbps": 25
+  }
+}

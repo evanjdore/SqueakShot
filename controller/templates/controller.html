@@ -1,0 +1,1456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SqueakShot - Camera Controller</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary: #008080;
+            --primary-dark: #006666;
+            --primary-light: #00a0a0;
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #1a1a1a;
+            --bg-tertiary: #252525;
+            --text-primary: #e5e5e5;
+            --text-secondary: #a0a0a0;
+            --border: #2a2a2a;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .sidebar {
+            position: fixed; top: 0; left: 0; height: 100vh; width: 240px;
+            background: var(--bg-secondary); border-right: 1px solid var(--border);
+            z-index: 1000; display: flex; flex-direction: column;
+        }
+        .sidebar-header { padding: 30px 20px; border-bottom: 1px solid var(--border); }
+        .logo-container {
+            width: 100%; padding: 15px; background: var(--bg-primary);
+            border-radius: 6px; display: flex; align-items: center; justify-content: center;
+        }
+        .logo-container img { width: 100%; height: auto; }
+        .sidebar-menu { flex: 1; padding: 20px 0; overflow-y: auto; }
+        .menu-section { margin-bottom: 20px; }
+        .menu-section-title {
+            padding: 8px 20px; font-size: 11px; text-transform: uppercase;
+            letter-spacing: 1px; color: var(--text-secondary); font-weight: 600;
+        }
+        .menu-item {
+            padding: 12px 20px; color: var(--text-secondary); text-decoration: none;
+            display: flex; align-items: center; gap: 12px; transition: all 0.2s;
+            cursor: pointer; font-weight: 500; border-left: 2px solid transparent;
+        }
+        .menu-item:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+        .menu-item.active {
+            background: var(--bg-tertiary); color: var(--primary);
+            border-left-color: var(--primary);
+        }
+        .menu-item i { width: 18px; font-size: 16px; }
+        .main-content { margin-left: 240px; padding: 30px; min-height: 100vh; }
+        .page-header {
+            margin-bottom: 30px; display: flex;
+            justify-content: space-between; align-items: center;
+        }
+        .page-title { font-size: 24px; font-weight: 600; }
+        .header-actions { display: flex; gap: 15px; align-items: center; }
+        .status-pill {
+            padding: 6px 14px; border-radius: 20px; font-size: 13px; font-weight: 500;
+            display: flex; align-items: center; gap: 8px;
+            background: var(--bg-tertiary); border: 1px solid var(--border);
+        }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .status-dot.recording { background: var(--danger); animation: pulse 2s infinite; }
+        .status-dot.idle { background: var(--primary); }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            border-radius: 8px; padding: 24px; margin-bottom: 24px;
+        }
+        .card-header {
+            margin-bottom: 20px; padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .card-title {
+            font-size: 16px; font-weight: 600;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .card-title i { color: var(--primary); font-size: 18px; }
+        .stats-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px; margin-bottom: 24px;
+        }
+        .stat-card {
+            background: var(--bg-secondary); border: 1px solid var(--border);
+            padding: 20px; border-radius: 8px;
+            display: flex; flex-direction: column; gap: 8px;
+        }
+        .stat-label {
+            font-size: 12px; color: var(--text-secondary);
+            text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;
+        }
+        .stat-value {
+            font-size: 20px; font-weight: 600;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .connection-indicator { width: 10px; height: 10px; border-radius: 50%; }
+        .connection-indicator.online { background: var(--success); box-shadow: 0 0 8px var(--success); }
+        .connection-indicator.offline { background: var(--danger); }
+        .btn {
+            padding: 10px 20px; border: none; border-radius: 6px;
+            font-size: 13px; font-weight: 500; cursor: pointer;
+            transition: all 0.2s; display: inline-flex; align-items: center;
+            gap: 8px; font-family: inherit;
+        }
+        .btn:hover:not(:disabled) { transform: translateY(-1px); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
+        .btn-success { background: var(--success); color: white; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-secondary {
+            background: var(--bg-tertiary); color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+        .btn-group { display: flex; gap: 12px; flex-wrap: wrap; }
+        .thermal-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px;
+        }
+        .thermal-card {
+            background: var(--bg-tertiary); padding: 20px; border-radius: 8px;
+            border-left: 3px solid var(--success);
+        }
+        .thermal-card.warning { border-left-color: var(--warning); }
+        .thermal-card.danger { border-left-color: var(--danger); }
+        .thermal-card.offline { border-left-color: var(--text-secondary); opacity: 0.6; }
+        .thermal-label {
+            font-size: 12px; color: var(--text-secondary);
+            text-transform: uppercase; margin-bottom: 8px; font-weight: 500;
+        }
+        .thermal-temp { font-size: 32px; font-weight: 700; margin: 8px 0; }
+        .thermal-temp.normal { color: var(--success); }
+        .thermal-temp.warm { color: var(--warning); }
+        .thermal-temp.hot { color: var(--danger); }
+        .thermal-info { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+        .form-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;
+        }
+        .form-section {
+            background: var(--bg-tertiary); padding: 20px;
+            border-radius: 8px; border: 1px solid var(--border);
+        }
+        .form-section-title {
+            font-size: 14px; font-weight: 600; color: var(--primary);
+            margin-bottom: 16px; text-transform: uppercase; letter-spacing: 0.5px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .form-group { margin-bottom: 16px; }
+        label {
+            display: block; margin-bottom: 6px;
+            color: var(--text-secondary); font-size: 13px; font-weight: 500;
+        }
+        input[type="text"], input[type="number"], select {
+            width: 100%; padding: 10px 12px;
+            background: var(--bg-primary); border: 1px solid var(--border);
+            border-radius: 6px; color: var(--text-primary); font-size: 14px;
+            font-family: inherit; transition: border-color 0.2s;
+        }
+        input:focus, select:focus { outline: none; border-color: var(--primary); }
+        .logs-container {
+            background: var(--bg-primary); border: 1px solid var(--border);
+            border-radius: 8px; padding: 16px; max-height: 400px; overflow-y: auto;
+            font-family: 'Monaco', 'Courier New', monospace; font-size: 12px; user-select: text;
+        }
+        .log-entry { padding: 4px 0; color: var(--text-secondary); line-height: 1.6; }
+        .alert {
+            padding: 12px 16px; border-radius: 6px; margin-bottom: 20px;
+            display: flex; align-items: flex-start; gap: 12px; font-size: 13px;
+        }
+        .alert i { margin-top: 2px; }
+        .alert-warning { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--warning); }
+        .alert-info { background: rgba(0, 128, 128, 0.1); border: 1px solid rgba(0, 128, 128, 0.3); color: var(--primary); }
+        .alert-success { background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: var(--success); }
+        .recording-item {
+            background: var(--bg-tertiary); border: 1px solid var(--border);
+            border-radius: 6px; padding: 16px; margin-bottom: 12px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .recording-info { flex: 1; }
+        .recording-name { font-weight: 600; margin-bottom: 4px; }
+        .recording-meta { font-size: 12px; color: var(--text-secondary); }
+        .recording-actions { display: flex; gap: 8px; }
+        .content-section { display: none; }
+        .content-section.active { display: block; }
+        .btn-small { padding: 6px 12px; font-size: 12px; }
+        .file-list { max-height: 300px; overflow-y: auto; }
+        .file-item {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px; background: var(--bg-tertiary);
+            border-radius: 4px; margin-bottom: 8px;
+        }
+        .file-item .file-name { font-weight: 500; }
+        .file-item .file-size { color: var(--text-secondary); font-size: 12px; }
+        .frame-preview {
+            background: var(--bg-primary); border: 1px solid var(--border);
+            border-radius: 8px; overflow: hidden; margin-bottom: 20px;
+        }
+        .frame-preview img { width: 100%; height: auto; display: block; }
+        .frame-controls { padding: 16px; background: var(--bg-tertiary); }
+        input[type="range"] {
+            -webkit-appearance: none; width: 100%; height: 6px;
+            background: var(--bg-primary); border-radius: 3px; outline: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 18px; height: 18px;
+            background: var(--primary); border-radius: 50%; cursor: pointer;
+        }
+        .checkbox-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+        .checkbox-label input { width: 18px; height: 18px; }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: var(--bg-tertiary); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--border); }
+        .spinner {
+            width: 24px; height: 24px;
+            border: 3px solid var(--bg-tertiary); border-top-color: var(--primary);
+            border-radius: 50%; animation: spin 1s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .btn.loading { position: relative; color: transparent; pointer-events: none; }
+        .btn.loading::after {
+            content: ''; position: absolute; width: 16px; height: 16px;
+            top: 50%; left: 50%; margin-left: -8px; margin-top: -8px;
+            border: 2px solid transparent; border-top-color: white;
+            border-radius: 50%; animation: spin 0.8s linear infinite;
+        }
+        /* Preview tab */
+        .preview-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+            gap: 20px;
+        }
+        .preview-card {
+            background: var(--bg-tertiary); border-radius: 8px; overflow: hidden;
+            border: 1px solid var(--border);
+        }
+        .preview-card-header {
+            padding: 12px 16px; background: var(--bg-secondary);
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        .preview-card-title { font-weight: 600; }
+        .preview-card-body {
+            position: relative; background: #000;
+            display: flex; align-items: center; justify-content: center;
+            min-height: 200px;
+        }
+        .preview-card-body img { width: 100%; height: auto; display: block; }
+        .preview-card-body .preview-placeholder {
+            color: var(--text-secondary); padding: 40px; text-align: center;
+        }
+        .camera-row {
+            display: grid; grid-template-columns: 1fr 1fr 1fr 1fr auto;
+            gap: 10px; align-items: end; margin-bottom: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo-container">
+                <img src="/static/logo.png" alt="SqueakShot" onerror="this.parentElement.innerHTML='<span style=\'font-size:20px;font-weight:700;color:var(--primary)\'>SqueakShot</span>'">
+            </div>
+        </div>
+        <div class="sidebar-menu">
+            <div class="menu-section">
+                <div class="menu-section-title">Camera</div>
+                <div class="menu-item active" onclick="showSection('control', this)">
+                    <i class="fas fa-video"></i><span>Recording</span>
+                </div>
+                <div class="menu-item" onclick="showSection('preview', this)">
+                    <i class="fas fa-eye"></i><span>Preview</span>
+                </div>
+            </div>
+            <div class="menu-section">
+                <div class="menu-section-title">Post-Processing</div>
+                <div class="menu-item" onclick="showSection('encode', this)">
+                    <i class="fas fa-file-video"></i><span>Encode</span>
+                </div>
+                <div class="menu-item" onclick="showSection('sync', this)">
+                    <i class="fas fa-sync-alt"></i><span>Sync</span>
+                </div>
+                <div class="menu-item" onclick="showSection('trim', this)">
+                    <i class="fas fa-cut"></i><span>Trim</span>
+                </div>
+            </div>
+            <div class="menu-section">
+                <div class="menu-section-title">System</div>
+                <div class="menu-item" onclick="showSection('settings', this)">
+                    <i class="fas fa-cog"></i><span>Settings</span>
+                </div>
+                <div class="menu-item" onclick="showSection('logs', this)">
+                    <i class="fas fa-list"></i><span>Logs</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-content">
+
+        <!-- RECORDING -->
+        <div id="control-section" class="content-section active">
+            <div class="page-header">
+                <h1 class="page-title">Recording</h1>
+                <div class="header-actions">
+                    <div class="status-pill">
+                        <div class="status-dot idle" id="recording-dot"></div>
+                        <span id="recording-status">Idle</span>
+                    </div>
+                    <div class="status-pill"><span id="elapsed-time">00:00:00</span></div>
+                </div>
+            </div>
+
+            <div id="not-configured-alert" class="alert alert-warning" style="display: none;">
+                <i class="fas fa-exclamation-triangle"></i>
+                <div><strong>Configuration Required</strong><br>Configure cameras in Settings first.</div>
+            </div>
+
+            <div class="stats-grid" id="camera-status-grid"></div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">Recording Time</div>
+                    <div class="stat-value" id="rec-timer" style="font-size: 28px; color: var(--danger);">00:00:00</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Sync Service</div>
+                    <div class="stat-value">
+                        <span class="connection-indicator" id="service-indicator"></span>
+                        <span id="service-status-text">Not Running</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Output Resolution</div>
+                    <div class="stat-value" id="output-resolution" style="font-size: 16px;">—</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-circle"></i>Recording Control</h2>
+                </div>
+                <div style="margin-bottom: 20px;">
+                    <h3 style="font-size: 14px; color: var(--text-secondary); margin-bottom: 12px; text-transform: uppercase;">File Naming</h3>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Animal ID</label>
+                            <input type="text" id="animal-id" placeholder="e.g., Mouse001">
+                        </div>
+                        <div class="form-group">
+                            <label>Project ID</label>
+                            <input type="text" id="project-id" placeholder="e.g., Experiment_A">
+                        </div>
+                    </div>
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle"></i>
+                        <span id="naming-hint">Files: cam0_AnimalID_ProjectID.h264, cam1_..., cam2_...</span>
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-success" id="start-btn" onclick="startRecording()" style="font-size: 16px; padding: 14px 28px;">
+                        <i class="fas fa-play"></i>Start Recording
+                    </button>
+                    <button class="btn btn-danger" id="stop-btn" onclick="stopRecording()" disabled style="font-size: 16px; padding: 14px 28px;">
+                        <i class="fas fa-stop"></i>Stop Recording
+                    </button>
+                    <button class="btn btn-secondary" onclick="runPreflight()" title="Check clock skew and disk space on every Pi">
+                        <i class="fas fa-clipboard-check"></i>Pre-flight Check
+                    </button>
+                </div>
+                <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+                    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                        <button class="btn btn-secondary" id="service-start-btn" onclick="startServices()">
+                            <i class="fas fa-play-circle"></i>Start Services
+                        </button>
+                        <button class="btn btn-secondary" id="service-stop-btn" onclick="stopServices()" disabled>
+                            <i class="fas fa-stop-circle"></i>Stop Services
+                        </button>
+                        <span style="color: var(--text-secondary); font-size: 12px;">
+                            <i class="fas fa-info-circle"></i> Services auto-start when recording begins
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-temperature-high"></i>Thermal Status</h2>
+                </div>
+                <div class="thermal-grid" id="thermal-grid"></div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-folder"></i>Recorded Files (on Pis)</h2>
+                    <button class="btn btn-secondary btn-small" onclick="refreshRecordings()">
+                        <i class="fas fa-sync"></i>Refresh
+                    </button>
+                </div>
+                <div id="recordings-list">
+                    <div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                        <i class="fas fa-video" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
+                        <p>No recordings yet. Click "Refresh" to check for files.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PREVIEW -->
+        <div id="preview-section" class="content-section">
+            <div class="page-header">
+                <h1 class="page-title">Camera Previews</h1>
+                <div class="header-actions">
+                    <button class="btn btn-success" id="preview-start-btn" onclick="startPreviews()">
+                        <i class="fas fa-play"></i>Start Previews
+                    </button>
+                    <button class="btn btn-secondary" id="preview-stop-btn" onclick="stopPreviews()">
+                        <i class="fas fa-stop"></i>Stop Previews
+                    </button>
+                </div>
+            </div>
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                <div><strong>Preview mode is mutually exclusive with recording.</strong> Starting previews stops the record service; starting a recording stops previews.</div>
+            </div>
+            <div class="preview-grid" id="preview-grid"></div>
+        </div>
+
+        <!-- ENCODE -->
+        <div id="encode-section" class="content-section">
+            <div class="page-header">
+                <h1 class="page-title">Encode Videos</h1>
+                <button class="btn btn-secondary" onclick="openFolder('raw')">
+                    <i class="fas fa-folder-open"></i>Open Raw Folder
+                </button>
+            </div>
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                <div><strong>Workflow:</strong> Set output dir → Download raw H264 from all Pis → Encode to MP4</div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-folder"></i>Output Directory</h2>
+                </div>
+                <div class="form-group">
+                    <label>Save videos to:</label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" id="local-video-dir" placeholder="C:\Users\...\Videos" style="flex: 1;">
+                        <button class="btn btn-secondary" onclick="openLocalDir()">
+                            <i class="fas fa-folder-open"></i>Open
+                        </button>
+                        <button class="btn btn-primary" onclick="saveLocalDir()">
+                            <i class="fas fa-save"></i>Save
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-download"></i>Step 1: Download from Pis</h2>
+                    <button class="btn btn-secondary btn-small" onclick="refreshRecordings(); refreshEncodeList();">
+                        <i class="fas fa-sync"></i>Refresh
+                    </button>
+                </div>
+                <div class="form-group">
+                    <label>Select Recording</label>
+                    <select id="encode-recording-select"><option value="">-- Select --</option></select>
+                </div>
+                <button class="btn btn-primary" id="download-btn" onclick="downloadForEncode()">
+                    <i class="fas fa-cloud-download-alt"></i>Download from Pis
+                </button>
+                <div id="encode-download-status" style="margin-top: 16px;"></div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-cog"></i>Step 2: Encode to MP4</h2>
+                    <button class="btn btn-secondary btn-small" onclick="refreshLocalFiles(); updateEncodeDropdown();">
+                        <i class="fas fa-sync"></i>Refresh
+                    </button>
+                </div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Select Downloaded Recording</label>
+                        <select id="encode-local-select"><option value="">-- Select --</option></select>
+                    </div>
+                    <div class="form-group">
+                        <label>Frame Rate (fps)</label>
+                        <input type="number" id="encode-fps" value="56">
+                    </div>
+                </div>
+                <label class="checkbox-label" style="margin-bottom: 16px;">
+                    <input type="checkbox" id="encode-delete-h264">Delete H264 after encoding
+                </label>
+                <div class="btn-group">
+                    <button class="btn btn-success" id="encode-btn" onclick="startEncode()">
+                        <i class="fas fa-play"></i>Start Encoding
+                    </button>
+                    <button class="btn btn-secondary" onclick="openFolder('encoded')">
+                        <i class="fas fa-folder-open"></i>Open Encoded Folder
+                    </button>
+                </div>
+                <div id="encode-progress" style="display: none; margin-top: 20px;">
+                    <div style="display: flex; align-items: center; gap: 12px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
+                        <div class="spinner"></div>
+                        <div>
+                            <div style="font-weight: 600; color: var(--primary);">Encoding...</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="encode-progress-text">Processing</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title"><i class="fas fa-hdd"></i>Local Files</h2>
+                    <button class="btn btn-secondary btn-small" onclick="refreshLocalFiles()">
+                        <i class="fas fa-sync"></i>Refresh
+                    </button>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div>
+                        <h4 style="margin-bottom: 12px; color: var(--text-secondary);">Raw (H264)</h4>
+                        <div class="file-list" id="raw-files-list"><p style="color: var(--text-secondary);">No files</p></div>
+                    </div>
+                    <div>
+                        <h4 style="margin-bottom: 12px; color: var(--text-secondary);">Encoded (MP4)</h4>
+                        <div class="file-list" id="encoded-files-list"><p style="color: var(--text-secondary);">No files</p></div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-terminal"></i>Encode Log</h2></div>
+                <div class="logs-container" id="encode-logs" style="max-height: 250px;">
+                    <div class="log-entry">Ready to encode...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- SYNC -->
+        <div id="sync-section" class="content-section">
+            <div class="page-header">
+                <h1 class="page-title">Synchronize Videos</h1>
+                <button class="btn btn-secondary" onclick="openFolder('synced')">
+                    <i class="fas fa-folder-open"></i>Open Synced Folder
+                </button>
+            </div>
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                <div><strong>Workflow:</strong> Analyze PTS → Match frames across all cameras → Create synced videos</div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-search"></i>Step 1: Analyze</h2></div>
+                <div class="form-group">
+                    <label>Select Encoded Recording</label>
+                    <select id="sync-recording-select" onchange="updateSyncName()"><option value="">-- Select --</option></select>
+                </div>
+                <button class="btn btn-primary" id="analyze-btn" onclick="analyzeSync()">
+                    <i class="fas fa-chart-bar"></i>Analyze PTS Timestamps
+                </button>
+                <div id="sync-analysis-results" style="margin-top: 20px;"></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-sync-alt"></i>Step 2: Synchronize</h2></div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Recording Name</label>
+                        <input type="text" id="sync-name" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label>Frame Rate (fps)</label>
+                        <input type="number" id="sync-fps" value="56">
+                    </div>
+                </div>
+                <button class="btn btn-success" onclick="startSync()" id="sync-start-btn" disabled>
+                    <i class="fas fa-play"></i>Start Synchronization
+                </button>
+                <div id="sync-progress" style="display: none; margin-top: 20px;">
+                    <div style="display: flex; align-items: center; gap: 12px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">
+                        <div class="spinner"></div>
+                        <div>
+                            <div style="font-weight: 600; color: var(--primary);">Syncing...</div>
+                            <div style="font-size: 12px; color: var(--text-secondary);" id="sync-progress-text">Processing</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-terminal"></i>Sync Log</h2></div>
+                <div class="logs-container" id="sync-logs" style="max-height: 250px;">
+                    <div class="log-entry">Ready to sync...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TRIM -->
+        <div id="trim-section" class="content-section">
+            <div class="page-header">
+                <h1 class="page-title">Trim Videos</h1>
+                <button class="btn btn-secondary" onclick="openFolder('trimmed')">
+                    <i class="fas fa-folder-open"></i>Open Trimmed Folder
+                </button>
+            </div>
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                <div><strong>Workflow:</strong> Load synced videos → Select frame range → Trim all cameras together</div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-film"></i>Step 1: Load Video</h2></div>
+                <div class="form-group">
+                    <label>Select Synced Recording</label>
+                    <select id="trim-recording-select" onchange="loadTrimVideo()"><option value="">-- Select --</option></select>
+                </div>
+                <div id="trim-video-info" style="margin-top: 16px;"></div>
+            </div>
+            <div class="card" id="trim-frame-card" style="display: none;">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-crop-alt"></i>Step 2: Select Range</h2></div>
+                <div class="frame-preview">
+                    <img id="trim-preview-img" src="" alt="Frame preview" style="max-height: 400px; object-fit: contain; background: #000;">
+                    <div class="frame-controls">
+                        <label>Current Frame</label>
+                        <input type="range" id="trim-frame-slider" min="0" max="100" value="0" oninput="updateTrimPreview()" style="width:100%;">
+                        <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary); margin-top: 6px;">
+                            <span>Frame: <strong id="trim-current-frame">0</strong></span>
+                            <span>Time: <strong id="trim-current-time">0.00s</strong></span>
+                        </div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
+                            <div>
+                                <label>Start Frame</label>
+                                <div style="display: flex; gap: 8px;">
+                                    <input type="number" id="trim-start-frame" value="0" oninput="updateTrimSelection()" style="flex: 1;">
+                                    <button class="btn btn-secondary btn-small" onclick="setTrimStart()">Set</button>
+                                </div>
+                            </div>
+                            <div>
+                                <label>End Frame</label>
+                                <div style="display: flex; gap: 8px;">
+                                    <input type="number" id="trim-end-frame" value="0" oninput="updateTrimSelection()" style="flex: 1;">
+                                    <button class="btn btn-secondary btn-small" onclick="setTrimEnd()">Set</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; font-size: 12px; color: var(--text-secondary);">
+                            <span>Selected: <strong id="trim-selected-frames">0</strong> frames</span>
+                            <span>Duration: <strong id="trim-selected-duration">0.00s</strong></span>
+                        </div>
+                    </div>
+                </div>
+                <div class="btn-group" style="margin-bottom: 20px;">
+                    <button class="btn btn-secondary" onclick="jumpFrames(-100)">-100</button>
+                    <button class="btn btn-secondary" onclick="jumpFrames(-10)">-10</button>
+                    <button class="btn btn-secondary" onclick="jumpFrames(-1)">-1</button>
+                    <button class="btn btn-secondary" onclick="jumpFrames(1)">+1</button>
+                    <button class="btn btn-secondary" onclick="jumpFrames(10)">+10</button>
+                    <button class="btn btn-secondary" onclick="jumpFrames(100)">+100</button>
+                </div>
+                <button class="btn btn-success" onclick="startTrim()" style="font-size: 16px; padding: 14px 28px;">
+                    <i class="fas fa-cut"></i>Trim Videos
+                </button>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-terminal"></i>Trim Log</h2></div>
+                <div class="logs-container" id="trim-logs" style="max-height: 250px;">
+                    <div class="log-entry">Ready to trim...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div id="settings-section" class="content-section">
+            <div class="page-header"><h1 class="page-title">Settings</h1></div>
+            <div class="alert alert-info">
+                <i class="fas fa-info-circle"></i>
+                <div><strong>Star Topology:</strong> One server (cam0) plus N clients (cam1, cam2, ...). Set role=server on exactly one camera. SSH keys must be set up for each Pi.</div>
+            </div>
+            <form id="config-form">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title"><i class="fas fa-video"></i>Cameras</h2>
+                        <button type="button" class="btn btn-secondary btn-small" onclick="addCamera()">
+                            <i class="fas fa-plus"></i>Add Camera
+                        </button>
+                    </div>
+                    <div id="cameras-list"></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h2 class="card-title"><i class="fas fa-sliders-h"></i>Camera Settings</h2></div>
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle"></i>
+                        <div>The <strong>sensor mode</strong> stays at 2304×1296 (full FOV via 2×2 binning). The ISP downscales to your output resolution while preserving the lens field of view.</div>
+                    </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>Output Width (px), encoded video</label>
+                            <input type="number" id="settings-output-width" value="1536">
+                        </div>
+                        <div class="form-group">
+                            <label>Output Height (px), encoded video</label>
+                            <input type="number" id="settings-output-height" value="864">
+                        </div>
+                        <div class="form-group">
+                            <label>Sensor Width (px), full FOV</label>
+                            <input type="number" id="settings-sensor-width" value="2304">
+                        </div>
+                        <div class="form-group">
+                            <label>Sensor Height (px), full FOV</label>
+                            <input type="number" id="settings-sensor-height" value="1296">
+                        </div>
+                        <div class="form-group">
+                            <label>Frame Rate (fps)</label>
+                            <input type="number" id="settings-framerate" value="56">
+                        </div>
+                        <div class="form-group">
+                            <label>Bitrate (Mbps)</label>
+                            <input type="number" id="settings-bitrate" value="25">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Remote Video Directory (on Pis)</label>
+                        <input type="text" id="video-dir" value="/home/maiya/camera_videos">
+                    </div>
+                    <div class="btn-group">
+                        <button type="button" class="btn btn-secondary" onclick="testConnections()">
+                            <i class="fas fa-plug"></i>Test Connections
+                        </button>
+                        <button type="submit" class="btn btn-success">
+                            <i class="fas fa-save"></i>Save Configuration
+                        </button>
+                    </div>
+                </div>
+            </form>
+            <div id="test-results" style="margin-top: 20px;"></div>
+        </div>
+
+        <!-- LOGS -->
+        <div id="logs-section" class="content-section">
+            <div class="page-header"><h1 class="page-title">System Logs</h1></div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-terminal"></i>Server (cam0)</h2></div>
+                <div class="logs-container" id="server-logs"><div class="log-entry">Waiting for activity...</div></div>
+            </div>
+            <div class="card">
+                <div class="card-header"><h2 class="card-title"><i class="fas fa-terminal"></i>Preview</h2></div>
+                <div class="logs-container" id="preview-logs"><div class="log-entry">Waiting...</div></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================================
+        // State
+        // ============================================================================
+        let currentConfig = null;
+        let cameras = [];
+        let recordings = [];
+        let localFiles = {raw: [], encoded: [], synced: [], trimmed: []};
+        let trimVideoInfo = null;
+
+        // ============================================================================
+        // Navigation
+        // ============================================================================
+        function showSection(section, el) {
+            document.querySelectorAll('.content-section').forEach(e => e.classList.remove('active'));
+            document.querySelectorAll('.menu-item').forEach(e => e.classList.remove('active'));
+            document.getElementById(section + '-section').classList.add('active');
+            if (el) el.classList.add('active');
+            if (section === 'encode') { refreshEncodeList(); refreshLocalFiles(); }
+            else if (section === 'sync') refreshSyncList();
+            else if (section === 'trim') refreshTrimList();
+            else if (section === 'preview') refreshPreviews();
+        }
+
+        // ============================================================================
+        // Config
+        // ============================================================================
+        async function loadConfig() {
+            try {
+                const r = await fetch('/api/config');
+                currentConfig = await r.json();
+                cameras = currentConfig.cameras || [];
+                renderCameraSettings();
+                const cs = currentConfig.camera_settings || {};
+                document.getElementById('settings-output-width').value = cs.output_width || 1536;
+                document.getElementById('settings-output-height').value = cs.output_height || 864;
+                document.getElementById('settings-sensor-width').value = cs.sensor_width || 2304;
+                document.getElementById('settings-sensor-height').value = cs.sensor_height || 1296;
+                document.getElementById('settings-framerate').value = cs.framerate || 56;
+                document.getElementById('settings-bitrate').value = cs.bitrate_mbps || 25;
+                document.getElementById('video-dir').value = currentConfig.video_dir || '';
+                document.getElementById('encode-fps').value = cs.framerate || 56;
+                document.getElementById('sync-fps').value = cs.framerate || 56;
+                document.getElementById('output-resolution').textContent =
+                    `${cs.output_width || 1536}×${cs.output_height || 864} @ ${cs.framerate || 56}fps`;
+                updateNamingHint();
+            } catch (e) { console.error(e); }
+        }
+
+        function renderCameraSettings() {
+            const container = document.getElementById('cameras-list');
+            container.innerHTML = '';
+            cameras.forEach((cam, idx) => {
+                const row = document.createElement('div');
+                row.className = 'camera-row';
+                row.innerHTML = `
+                    <div class="form-group" style="margin:0;">
+                        <label>Name</label>
+                        <input type="text" value="${cam.name || ''}" onchange="updateCamera(${idx}, 'name', this.value)">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label>IP Address</label>
+                        <input type="text" value="${cam.ip || ''}" onchange="updateCamera(${idx}, 'ip', this.value)" placeholder="192.168.1.100">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label>SSH User</label>
+                        <input type="text" value="${cam.user || 'maiya'}" onchange="updateCamera(${idx}, 'user', this.value)">
+                    </div>
+                    <div class="form-group" style="margin:0;">
+                        <label>Role</label>
+                        <select onchange="updateCamera(${idx}, 'role', this.value)">
+                            <option value="server" ${cam.role === 'server' ? 'selected' : ''}>Server</option>
+                            <option value="client" ${cam.role === 'client' ? 'selected' : ''}>Client</option>
+                        </select>
+                    </div>
+                    <button type="button" class="btn btn-secondary btn-small" onclick="removeCamera(${idx})" title="Remove">
+                        <i class="fas fa-trash"></i>
+                    </button>`;
+                container.appendChild(row);
+            });
+        }
+
+        function updateCamera(idx, field, value) { cameras[idx][field] = value; updateNamingHint(); }
+        function removeCamera(idx) { cameras.splice(idx, 1); renderCameraSettings(); updateNamingHint(); }
+        function addCamera() {
+            const next = cameras.length;
+            cameras.push({name: `cam${next}`, ip: '', user: 'maiya', role: 'client'});
+            renderCameraSettings(); updateNamingHint();
+        }
+
+        function updateNamingHint() {
+            const hint = document.getElementById('naming-hint');
+            if (!hint) return;
+            const names = cameras.filter(c => c.ip).map(c => `${c.name}_AnimalID_ProjectID.h264`);
+            if (names.length) hint.textContent = 'Files: ' + names.join(', ');
+        }
+
+        document.getElementById('config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const cfg = {
+                cameras: cameras,
+                video_dir: document.getElementById('video-dir').value,
+                local_video_dir: currentConfig.local_video_dir,
+                camera_settings: {
+                    output_width: parseInt(document.getElementById('settings-output-width').value),
+                    output_height: parseInt(document.getElementById('settings-output-height').value),
+                    sensor_width: parseInt(document.getElementById('settings-sensor-width').value),
+                    sensor_height: parseInt(document.getElementById('settings-sensor-height').value),
+                    framerate: parseInt(document.getElementById('settings-framerate').value),
+                    bitrate_mbps: parseInt(document.getElementById('settings-bitrate').value),
+                }
+            };
+            const r = await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(cfg)
+            });
+            if (r.ok) {
+                document.getElementById('test-results').innerHTML =
+                    '<div class="alert alert-success"><i class="fas fa-check-circle"></i>Saved</div>';
+                setTimeout(() => document.getElementById('test-results').innerHTML = '', 3000);
+                loadConfig();
+            }
+        });
+
+        async function testConnections() {
+            const div = document.getElementById('test-results');
+            div.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i>Testing...</div>';
+            const r = await fetch('/api/test_connection', {method: 'POST'});
+            const results = await r.json();
+            let html = '<div class="stats-grid">';
+            for (const cam of cameras) {
+                const status = results.cameras[cam.name];
+                const ok = status && status.connected;
+                html += `<div class="stat-card">
+                    <div class="stat-label">${cam.name}</div>
+                    <div class="stat-value">
+                        <span class="connection-indicator ${ok ? 'online' : 'offline'}"></span>
+                        <span>${ok ? 'Connected' : 'Failed'}</span>
+                    </div>
+                </div>`;
+            }
+            html += '</div>';
+            div.innerHTML = html;
+        }
+
+        // ============================================================================
+        // Status updates
+        // ============================================================================
+        async function updateStatus() {
+            try {
+                const r = await fetch('/api/status');
+                const s = await r.json();
+
+                renderCameraStatusGrid(s);
+                renderThermalGrid(s);
+
+                const dot = document.getElementById('recording-dot');
+                const text = document.getElementById('recording-status');
+                const startBtn = document.getElementById('start-btn');
+                const stopBtn = document.getElementById('stop-btn');
+                if (s.is_recording) {
+                    if (dot) dot.className = 'status-dot recording';
+                    if (text) text.textContent = 'Recording';
+                    if (startBtn) startBtn.disabled = true;
+                    if (stopBtn) stopBtn.disabled = false;
+                } else {
+                    if (dot) dot.className = 'status-dot idle';
+                    if (text) text.textContent = 'Idle';
+                    if (startBtn) startBtn.disabled = false;
+                    if (stopBtn) stopBtn.disabled = true;
+                }
+
+                const t = s.start_time ? Math.floor(Date.now()/1000 - s.start_time) : 0;
+                const timeStr = s.start_time
+                    ? `${String(Math.floor(t/3600)).padStart(2,'0')}:${String(Math.floor((t%3600)/60)).padStart(2,'0')}:${String(t%60).padStart(2,'0')}`
+                    : '00:00:00';
+                document.getElementById('elapsed-time').textContent = timeStr;
+                document.getElementById('rec-timer').textContent = timeStr;
+
+                const sIndicator = document.getElementById('service-indicator');
+                const sText = document.getElementById('service-status-text');
+                if (sIndicator) sIndicator.className = 'connection-indicator ' + (s.service_running ? 'online' : 'offline');
+                if (sText) sText.textContent = s.service_running ? 'Running' : 'Not Running';
+                document.getElementById('service-start-btn').disabled = s.service_running;
+                document.getElementById('service-stop-btn').disabled = !s.service_running;
+
+                // Preview controls
+                const prevStart = document.getElementById('preview-start-btn');
+                const prevStop = document.getElementById('preview-stop-btn');
+                if (prevStart) prevStart.disabled = s.preview_running || s.is_recording;
+                if (prevStop) prevStop.disabled = !s.preview_running;
+            } catch (e) { console.error(e); }
+        }
+
+        function renderCameraStatusGrid(s) {
+            const grid = document.getElementById('camera-status-grid');
+            const cams = s.cameras.filter(c => c.ip);
+            grid.innerHTML = '';
+            cams.forEach(c => {
+                const st = s.camera_status[c.name] || {};
+                const conn = st.connected;
+                grid.innerHTML += `<div class="stat-card">
+                    <div class="stat-label">${c.name} (${c.role})</div>
+                    <div class="stat-value">
+                        <span class="connection-indicator ${conn ? 'online' : 'offline'}"></span>
+                        <span>${conn ? 'Online' : 'Offline'}</span>
+                    </div>
+                </div>`;
+            });
+        }
+
+        function renderThermalGrid(s) {
+            const grid = document.getElementById('thermal-grid');
+            const cams = s.cameras.filter(c => c.ip);
+            grid.innerHTML = '';
+            cams.forEach(c => {
+                const st = s.camera_status[c.name] || {};
+                const temp = st.temp;
+                const flags = st.throttle_flags || [];
+                let cls = 'thermal-card', tempCls = 'thermal-temp', tempStr = '—', info = 'Offline';
+                if (st.connected) {
+                    if (temp != null) {
+                        tempStr = temp.toFixed(1) + '°C';
+                        if (temp > 70) { cls += ' danger'; tempCls += ' hot'; }
+                        else if (temp > 60) { cls += ' warning'; tempCls += ' warm'; }
+                        else { tempCls += ' normal'; }
+                    }
+                    info = flags.length ? flags.join(', ') : 'No throttling';
+                } else {
+                    cls += ' offline';
+                }
+                grid.innerHTML += `<div class="${cls}">
+                    <div class="thermal-label">${c.name}</div>
+                    <div class="${tempCls}">${tempStr}</div>
+                    <div class="thermal-info">${info}</div>
+                </div>`;
+            });
+        }
+
+        // ============================================================================
+        // Preview
+        // ============================================================================
+        function refreshPreviews() {
+            if (!currentConfig) return;
+            const grid = document.getElementById('preview-grid');
+            const cams = (currentConfig.cameras || []).filter(c => c.ip);
+            grid.innerHTML = '';
+            cams.forEach(c => {
+                const card = document.createElement('div');
+                card.className = 'preview-card';
+                // Cache-bust so reload works
+                const ts = Date.now();
+                card.innerHTML = `
+                    <div class="preview-card-header">
+                        <div class="preview-card-title">${c.name}</div>
+                        <span style="font-size:12px;color:var(--text-secondary);">${c.ip}:8080</span>
+                    </div>
+                    <div class="preview-card-body">
+                        <img src="http://${c.ip}:8080/stream.mjpg?t=${ts}"
+                             onerror="this.style.display='none';this.nextElementSibling.style.display='block';"
+                             alt="${c.name} preview">
+                        <div class="preview-placeholder" style="display:none;">
+                            <i class="fas fa-video-slash" style="font-size: 32px; opacity: 0.5; margin-bottom: 12px;"></i>
+                            <div>Preview not active</div>
+                            <div style="font-size: 12px; margin-top: 8px;">Click "Start Previews" above</div>
+                        </div>
+                    </div>`;
+                grid.appendChild(card);
+            });
+        }
+
+        async function startPreviews() {
+            const r = await fetch('/api/preview/start', {method: 'POST'});
+            if (r.ok) {
+                setTimeout(refreshPreviews, 3000); // give the Pis time to spin up
+            }
+        }
+        async function stopPreviews() {
+            await fetch('/api/preview/stop', {method: 'POST'});
+            setTimeout(refreshPreviews, 1000);
+        }
+
+        // ============================================================================
+        // Recording
+        // ============================================================================
+        async function startRecording(force = false) {
+            const a = document.getElementById('animal-id').value.trim();
+            const p = document.getElementById('project-id').value.trim();
+            if (!a || !p) { alert('Animal ID and Project ID required'); return; }
+            const r = await fetch('/api/start', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({animal_id: a, project_id: p, force: force})
+            });
+            if (r.status === 409) {
+                // Pre-flight check found issues, show them and ask user to confirm
+                const d = await r.json();
+                const warns = (d.preflight_warnings || []).map(w => '  • ' + w).join('\n');
+                const ok = confirm(
+                    'Pre-flight check found issues:\n\n' + warns +
+                    '\n\nRecord anyway?'
+                );
+                if (ok) { startRecording(true); }
+                return;
+            }
+            if (!r.ok) { const e = await r.json(); alert('Failed: ' + e.error); }
+        }
+        async function runPreflight() {
+            const r = await fetch('/api/preflight', {method: 'POST'});
+            const d = await r.json();
+            if (d.warnings && d.warnings.length) {
+                alert('Pre-flight warnings:\n\n' + d.warnings.map(w => '• ' + w).join('\n'));
+            } else {
+                alert('Pre-flight OK on all cameras.');
+            }
+        }
+        async function stopRecording() {
+            const r = await fetch('/api/stop', {method: 'POST'});
+            if (!r.ok) { const e = await r.json(); alert('Failed: ' + e.error); }
+        }
+        async function startServices() { await fetch('/api/services/start', {method: 'POST'}); }
+        async function stopServices() {
+            if (!confirm('Stop services?')) return;
+            await fetch('/api/services/stop', {method: 'POST'});
+        }
+
+        // ============================================================================
+        // Recordings list
+        // ============================================================================
+        async function refreshRecordings() {
+            try {
+                const r = await fetch('/api/recordings');
+                const d = await r.json();
+                recordings = d.recordings || [];
+                const c = document.getElementById('recordings-list');
+                if (!recordings.length) {
+                    c.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                        <i class="fas fa-video" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
+                        <p>No recordings found.</p></div>`;
+                    return;
+                }
+                c.innerHTML = recordings.map(rec => {
+                    const camStrs = Object.entries(rec.per_camera).map(([n, info]) =>
+                        `${n}: ${info.present ? info.size : '✗'}`).join(' | ');
+                    return `<div class="recording-item">
+                        <div class="recording-info">
+                            <div class="recording-name">${rec.name}</div>
+                            <div class="recording-meta">${camStrs} | ${rec.timestamp}</div>
+                        </div>
+                        <div class="recording-actions">
+                            <button class="btn btn-danger btn-small" onclick="deleteRecording('${rec.name}')">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) { console.error(e); }
+        }
+
+        async function deleteRecording(name) {
+            if (!confirm(`Delete "${name}" from all cameras?`)) return;
+            const r = await fetch(`/api/delete/${encodeURIComponent(name)}`, {method: 'DELETE'});
+            if (r.ok) refreshRecordings();
+        }
+
+        // ============================================================================
+        // Logs
+        // ============================================================================
+        async function updateLogs() {
+            try {
+                const r = await fetch('/api/logs');
+                const logs = await r.json();
+                ['server', 'encode', 'sync', 'trim', 'preview'].forEach(cat => {
+                    const el = document.getElementById(cat + '-logs');
+                    if (el && logs[cat] && logs[cat].length) {
+                        el.innerHTML = logs[cat].map(l => `<div class="log-entry">${l}</div>`).join('');
+                        el.scrollTop = el.scrollHeight;
+                    }
+                });
+            } catch (e) { console.error(e); }
+        }
+
+        // ============================================================================
+        // Local dir
+        // ============================================================================
+        async function loadLocalDir() {
+            const r = await fetch('/api/local_dir');
+            const d = await r.json();
+            document.getElementById('local-video-dir').value = d.path || '';
+        }
+        async function saveLocalDir() {
+            const p = document.getElementById('local-video-dir').value.trim();
+            if (!p) return;
+            const r = await fetch('/api/local_dir', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: p})
+            });
+            const d = await r.json();
+            if (d.success) { document.getElementById('local-video-dir').value = d.path; refreshLocalFiles(); }
+            else alert(d.error);
+        }
+        async function openLocalDir() {
+            const p = document.getElementById('local-video-dir').value.trim();
+            if (p) await fetch('/api/open_folder', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({folder: '', base_dir: p})
+            });
+        }
+        async function openFolder(f) {
+            await fetch('/api/open_folder', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({folder: f})
+            });
+        }
+
+        // ============================================================================
+        // Encode
+        // ============================================================================
+        let encodePoll = null;
+
+        async function refreshEncodeList() {
+            await refreshRecordings();
+            const sel = document.getElementById('encode-recording-select');
+            sel.innerHTML = '<option value="">-- Select --</option>';
+            recordings.forEach(r => {
+                const summary = Object.entries(r.per_camera)
+                    .map(([n, i]) => i.present ? i.size : '✗').join(' / ');
+                sel.innerHTML += `<option value="${r.name}">${r.name} (${summary})</option>`;
+            });
+        }
+
+        async function refreshLocalFiles() {
+            const r = await fetch('/api/encode/local_files');
+            localFiles = await r.json();
+            const rawList = document.getElementById('raw-files-list');
+            const encList = document.getElementById('encoded-files-list');
+            rawList.innerHTML = localFiles.raw.length
+                ? localFiles.raw.map(f => `<div class="file-item"><span class="file-name">${f.name}</span><span class="file-size">${f.size_str}</span></div>`).join('')
+                : '<p style="color: var(--text-secondary);">No files</p>';
+            encList.innerHTML = localFiles.encoded.length
+                ? localFiles.encoded.map(f => `<div class="file-item"><span class="file-name">${f.name}</span><span class="file-size">${f.size_str}</span></div>`).join('')
+                : '<p style="color: var(--text-secondary);">No files</p>';
+            updateEncodeDropdown();
+        }
+
+        function updateEncodeDropdown() {
+            const sel = document.getElementById('encode-local-select');
+            sel.innerHTML = '<option value="">-- Select --</option>';
+            const names = new Set();
+            localFiles.raw.forEach(f => {
+                if (f.name.endsWith('.h264')) {
+                    const m = f.name.match(/cam\d+_(.+)\.h264/);
+                    if (m) names.add(m[1]);
+                }
+            });
+            names.forEach(n => {
+                const cams = [...new Set(localFiles.raw
+                    .filter(f => f.name.endsWith(`_${n}.h264`))
+                    .map(f => f.name.split('_')[0]))];
+                sel.innerHTML += `<option value="${n}">${n} (${cams.join(', ')})</option>`;
+            });
+        }
+
+        async function downloadForEncode() {
+            const name = document.getElementById('encode-recording-select').value;
+            if (!name) { alert('Select a recording'); return; }
+            const btn = document.getElementById('download-btn');
+            const status = document.getElementById('encode-download-status');
+            btn.classList.add('loading'); btn.disabled = true;
+            status.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i>Downloading...</div>';
+            const r = await fetch('/api/encode/download', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name})
+            });
+            const d = await r.json();
+            if (d.success) {
+                status.innerHTML = '<div class="alert alert-success"><i class="fas fa-check"></i>Download complete</div>';
+                refreshLocalFiles();
+            } else {
+                status.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>${d.error}</div>`;
+            }
+            btn.classList.remove('loading'); btn.disabled = false;
+        }
+
+        async function startEncode() {
+            const name = document.getElementById('encode-local-select').value;
+            const fps = parseInt(document.getElementById('encode-fps').value);
+            const del = document.getElementById('encode-delete-h264').checked;
+            if (!name) { alert('Select a recording'); return; }
+            const btn = document.getElementById('encode-btn');
+            const prog = document.getElementById('encode-progress');
+            btn.classList.add('loading'); btn.disabled = true; prog.style.display = 'block';
+            const r = await fetch('/api/encode/start', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, fps, delete_h264: del})
+            });
+            if (!r.ok) { const e = await r.json(); alert(e.error); stopEncodePoll(); return; }
+            encodePoll = setInterval(async () => {
+                const s = await (await fetch('/api/encode/status')).json();
+                document.getElementById('encode-progress-text').textContent = s.message || 'Processing';
+                if (!s.is_encoding) { stopEncodePoll(); refreshLocalFiles(); }
+            }, 2000);
+        }
+        function stopEncodePoll() {
+            if (encodePoll) { clearInterval(encodePoll); encodePoll = null; }
+            const btn = document.getElementById('encode-btn');
+            const prog = document.getElementById('encode-progress');
+            btn.classList.remove('loading'); btn.disabled = false; prog.style.display = 'none';
+        }
+
+        // ============================================================================
+        // Sync
+        // ============================================================================
+        let syncPoll = null;
+
+        async function refreshSyncList() {
+            await refreshLocalFiles();
+            const sel = document.getElementById('sync-recording-select');
+            sel.innerHTML = '<option value="">-- Select --</option>';
+            const names = new Set();
+            localFiles.encoded.forEach(f => {
+                if (f.name.endsWith('.mp4')) {
+                    const m = f.name.match(/cam\d+_(.+)\.mp4/);
+                    if (m) names.add(m[1]);
+                }
+            });
+            names.forEach(n => sel.innerHTML += `<option value="${n}">${n}</option>`);
+        }
+        function updateSyncName() {
+            document.getElementById('sync-name').value =
+                document.getElementById('sync-recording-select').value;
+        }
+        async function analyzeSync() {
+            const name = document.getElementById('sync-recording-select').value;
+            if (!name) { alert('Select a recording'); return; }
+            const btn = document.getElementById('analyze-btn');
+            const results = document.getElementById('sync-analysis-results');
+            btn.classList.add('loading'); btn.disabled = true;
+            results.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i>Analyzing...</div>';
+            const r = await fetch('/api/sync/analyze', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name})
+            });
+            const d = await r.json();
+            if (d.error) {
+                results.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>${d.error}</div>`;
+            } else {
+                const qColor = d.sync_quality === 'Excellent' ? 'var(--success)' :
+                              d.sync_quality === 'Good' ? 'var(--primary)' : 'var(--warning)';
+                let camCards = d.per_camera.map(c =>
+                    `<div class="stat-card"><div class="stat-label">${c.name}</div>
+                     <div class="stat-value">${c.total_frames}</div>
+                     <div style="font-size:11px;color:var(--text-secondary);">${c.duration_sec.toFixed(2)}s</div></div>`
+                ).join('');
+                results.innerHTML = `<div class="stats-grid">${camCards}
+                    <div class="stat-card"><div class="stat-label">Matched</div><div class="stat-value">${d.matched_frames}</div></div>
+                    <div class="stat-card"><div class="stat-label">Quality</div>
+                        <div class="stat-value" style="color:${qColor}">${d.sync_quality}</div></div></div>
+                    <div class="alert alert-info" style="margin-top:16px;">
+                        <i class="fas fa-info-circle"></i>
+                        <div><strong>Timing:</strong> avg ${d.avg_timing_diff_ms.toFixed(2)} ms, max ${d.max_timing_diff_ms.toFixed(2)} ms</div>
+                    </div>`;
+                if (d.warnings && d.warnings.length) {
+                    results.innerHTML += d.warnings.map(w =>
+                        `<div class="alert alert-warning" style="margin-top:12px;">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <div><strong>Warning:</strong> ${w}</div>
+                        </div>`
+                    ).join('');
+                }
+                document.getElementById('sync-name').value = name;
+                document.getElementById('sync-start-btn').disabled = false;
+            }
+            btn.classList.remove('loading'); btn.disabled = false;
+        }
+        async function startSync() {
+            const name = document.getElementById('sync-name').value;
+            const fps = parseInt(document.getElementById('sync-fps').value);
+            if (!name) return;
+            const btn = document.getElementById('sync-start-btn');
+            const prog = document.getElementById('sync-progress');
+            btn.classList.add('loading'); btn.disabled = true; prog.style.display = 'block';
+            const r = await fetch('/api/sync/start', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name, fps})
+            });
+            if (!r.ok) { stopSyncPoll(); return; }
+            syncPoll = setInterval(async () => {
+                const s = await (await fetch('/api/sync/status')).json();
+                document.getElementById('sync-progress-text').textContent = s.message || 'Processing';
+                if (!s.is_syncing) { stopSyncPoll(); refreshLocalFiles(); }
+            }, 2000);
+        }
+        function stopSyncPoll() {
+            if (syncPoll) { clearInterval(syncPoll); syncPoll = null; }
+            const btn = document.getElementById('sync-start-btn');
+            const prog = document.getElementById('sync-progress');
+            btn.classList.remove('loading'); btn.disabled = false; prog.style.display = 'none';
+        }
+
+        // ============================================================================
+        // Trim
+        // ============================================================================
+        async function refreshTrimList() {
+            await refreshLocalFiles();
+            const sel = document.getElementById('trim-recording-select');
+            sel.innerHTML = '<option value="">-- Select --</option>';
+            const names = new Set();
+            localFiles.synced.forEach(f => {
+                if (f.name.endsWith('_synced.mp4')) {
+                    const m = f.name.match(/cam\d+_(.+)_synced\.mp4/);
+                    if (m) names.add(m[1]);
+                }
+            });
+            names.forEach(n => sel.innerHTML += `<option value="${n}">${n}</option>`);
+        }
+        async function loadTrimVideo() {
+            const name = document.getElementById('trim-recording-select').value;
+            if (!name) { document.getElementById('trim-frame-card').style.display = 'none'; return; }
+            document.getElementById('trim-video-info').innerHTML =
+                '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i>Loading...</div>';
+            const r = await fetch('/api/trim/video_info', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name})
+            });
+            const info = await r.json();
+            if (info.error) {
+                document.getElementById('trim-video-info').innerHTML =
+                    `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>${info.error}</div>`;
+                return;
+            }
+            trimVideoInfo = info; trimVideoInfo.name = name;
+            document.getElementById('trim-video-info').innerHTML = `<div class="stats-grid">
+                <div class="stat-card"><div class="stat-label">Resolution</div><div class="stat-value">${info.width}×${info.height}</div></div>
+                <div class="stat-card"><div class="stat-label">FPS</div><div class="stat-value">${info.fps.toFixed(2)}</div></div>
+                <div class="stat-card"><div class="stat-label">Frames</div><div class="stat-value">${info.total_frames}</div></div>
+                <div class="stat-card"><div class="stat-label">Duration</div><div class="stat-value">${info.duration.toFixed(2)}s</div></div>
+            </div>`;
+            document.getElementById('trim-frame-card').style.display = 'block';
+            document.getElementById('trim-frame-slider').max = info.total_frames - 1;
+            document.getElementById('trim-frame-slider').value = 0;
+            document.getElementById('trim-start-frame').value = 0;
+            document.getElementById('trim-end-frame').value = info.total_frames - 1;
+            updateTrimPreview(); updateTrimSelection();
+        }
+        function updateTrimPreview() {
+            if (!trimVideoInfo) return;
+            const f = parseInt(document.getElementById('trim-frame-slider').value);
+            document.getElementById('trim-current-frame').textContent = f;
+            document.getElementById('trim-current-time').textContent = (f / trimVideoInfo.fps).toFixed(2) + 's';
+            document.getElementById('trim-preview-img').src = `/api/trim/frame/${encodeURIComponent(trimVideoInfo.name)}/${f}`;
+        }
+        function setTrimStart() {
+            document.getElementById('trim-start-frame').value =
+                document.getElementById('trim-frame-slider').value;
+            updateTrimSelection();
+        }
+        function setTrimEnd() {
+            document.getElementById('trim-end-frame').value =
+                document.getElementById('trim-frame-slider').value;
+            updateTrimSelection();
+        }
+        function updateTrimSelection() {
+            if (!trimVideoInfo) return;
+            const s = parseInt(document.getElementById('trim-start-frame').value);
+            const e = parseInt(document.getElementById('trim-end-frame').value);
+            const n = Math.max(0, e - s + 1);
+            document.getElementById('trim-selected-frames').textContent = n;
+            document.getElementById('trim-selected-duration').textContent = (n / trimVideoInfo.fps).toFixed(2) + 's';
+        }
+        function jumpFrames(d) {
+            if (!trimVideoInfo) return;
+            const sl = document.getElementById('trim-frame-slider');
+            sl.value = Math.max(0, Math.min(parseInt(sl.value) + d, trimVideoInfo.total_frames - 1));
+            updateTrimPreview();
+        }
+        async function startTrim() {
+            if (!trimVideoInfo) return;
+            const s = parseInt(document.getElementById('trim-start-frame').value);
+            const e = parseInt(document.getElementById('trim-end-frame').value);
+            if (s >= e) { alert('Start must be < end'); return; }
+            if (!confirm(`Trim frames ${s} to ${e}?`)) return;
+            await fetch('/api/trim/start', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: trimVideoInfo.name, start_frame: s, end_frame: e, fps: trimVideoInfo.fps})
+            });
+        }
+
+        // ============================================================================
+        // Boot
+        // ============================================================================
+        loadConfig();
+        loadLocalDir();
+        updateStatus();
+        updateLogs();
+        setInterval(updateStatus, 1000);
+        setInterval(updateLogs, 2000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+[Unit]
+Description=SqueakShot synchronized camera recording service
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=/home/__USER__
+ExecStart=__EXEC__
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Make sure the preview service is not running at the same time
+Conflicts=squeakshot-preview.service
+
+[Install]
+WantedBy=multi-user.target

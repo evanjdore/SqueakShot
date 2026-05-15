@@ -1,0 +1,38 @@
+﻿# Local config with real Pi IPs / usernames
+controller/camera_config.json
+controller/camera_config.json.bak
+
+# Runtime logs
+controller/logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Video files
+*.h264
+*.mp4
+*.pts
+*.mkv
+
+# Output zips
+*.zip
+
+# Local working dirs
+SqueakShot_Videos/
+videos/
