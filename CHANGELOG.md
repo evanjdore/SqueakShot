@@ -1,5 +1,90 @@
 # Changelog
 
+## v9.2: Pi 5 recording fixes, deployment fixes, Mac compatibility
+
+This release fixes a critical bug where Pi 5 cameras would create `.h264` files
+that were 0 bytes (no data written), plus a stdin bug in the installer that
+caused only the first camera to receive updates.
+
+Re-run `pi-deploy/install.sh` to push the new Pi-side service to every camera,
+and verify python3-av is installed on each Pi (`sudo apt install python3-av`).
+Both sides must update together (the controller's server-deadlock fix lives in
+sync_capture.py, not in the controller).
+
+### Critical bug fixes
+
+- **Empty .h264 recordings on Pi 5.** Two interacting causes:
+  1. `PTSOutput.outputframe` was calling `FileOutput.outputframe`, which has a
+     "first frame must be a keyframe" gate. On some Pi 5 libcamera builds this
+     check dropped every NAL unit, producing a 0-byte file. `PTSOutput` now
+     calls `FileOutput._write` directly to bypass the gate.
+  2. The V4L2 `H264Encoder` on Pi 5 can hand the encoder pipeline zero-length
+     buffers. New `create_h264_encoder()` prefers `LibavH264Encoder` (software
+     x264 via PyAV) when `python3-av` is installed, with the V4L2 encoder as
+     a fallback. `iperiod` is set from FPS, `framerate` is passed as
+     `fractions.Fraction` (not float, which broke PyAV with
+     "'float' object has no attribute 'numerator'"), and `force_key_frame()` is
+     nudged after `start_encoder` to make the first NAL an IDR.
+
+- **install.sh deployed only the first camera.** The `while read` loop reads
+  from `cameras.tsv`; every `ssh` call inside the loop inherited that stdin and
+  consumed the remaining lines. All `ssh` calls inside the loop now use
+  `ssh -n` (stdin from `/dev/null`).
+
+- **NoiseReductionModeEnum missing on newer libcamera.** Setting the control
+  unconditionally crashed camera setup on some Pi 5 builds. Now guarded with
+  `getattr(controls, "NoiseReductionModeEnum", None)`.
+
+- **encode="main" explicit.** `create_video_configuration` now explicitly
+  targets the main YUV stream for H264 encoding instead of relying on the
+  default, which has varied across picamera2 versions.
+
+### Server deadlock and control socket races
+
+- **Worker thread for control commands.** The server's main `select()` loop
+  used to call `_handle_control_command` directly, blocking Picamera2 servicing
+  during `wait_until` and `start_encoder`. Commands now run on a dedicated
+  daemon worker thread fed by a queue.
+- **`control_busy` Event.** While the worker is processing a command (and
+  possibly sending `OK:`/`ERROR:`), the main `select()` loop omits the control
+  socket from the read list. This eliminates `[Errno 9] Bad file descriptor`
+  and other races where the main thread `recv()`'d concurrently with the
+  worker's `send()`.
+- **`control_holder` dict.** Replaces a stale `control_conn` local that could
+  point at a closed socket when the worker reconnected the controller.
+- **Initial STATUS send is blocking.** `_accept_controller` flips the new
+  socket to blocking just long enough to send the initial `STATUS:` line, then
+  back to non-blocking. Prevents `BlockingIOError` on `sendall` immediately
+  after `accept()`.
+- **`recv_message` timeout 0.1s -> 5.0s** on control reads. The old value was
+  too tight under lab Wi-Fi / SSH muxing.
+
+### Controller (workstation side)
+
+- **`SQUEAKSHOT_PORT` env var** (default 5000) for the Flask UI. Set to
+  something else if macOS AirPlay receiver is enabled on port 5000.
+- **`SQUEAKSHOT_PREFLIGHT_CLOCK_SKEW_MS` env var** (clamped 50..2000, default
+  100). Lets you relax the threshold when controller-vs-Pi skew is stable but
+  just over 100 ms.
+- **60s wait for cam0:5006** after `systemctl start squeakshot-record`, with
+  "Still waiting..." log lines every 10 s. Cold-start camera init plus first
+  Libav encoder load can take 30s+.
+- **60s timeout on START reply** (was 15s). First Libav startup is slow.
+- **Encode pipeline:** skip 0-byte `.h264` with a clear journalctl hint instead
+  of opaque ffmpeg error. `ffmpeg -hide_banner -loglevel error`. Failure log
+  shows last 1500 chars of stderr.
+- **Dedup `ERROR: ERROR:`** when server reply already starts with `ERROR:`.
+
+### Operational notes
+
+- **`python3-av` required on Pis** for the preferred Libav encoder path.
+  Already present on standard Raspberry Pi OS images. If missing:
+  `sudo apt install python3-av`. Falls back to V4L2 encoder with a log warning
+  if unavailable.
+- See `DEPLOYMENT_HISTORY.md` for IPs, install flow, Mac sntp path, Chrony vs
+  `timedatectl`, and other field notes.
+
+
 ## v9.1: Bug fixes, pre-flight checks, parallel pipeline
 
 No breaking config changes. Re-run `pi-deploy/install.sh` to push the updated

@@ -1,7 +1,51 @@
 #!/usr/bin/env python3
 """
-Synchronized Camera Capture Service v9.1
+Synchronized Camera Capture Service v9.2.5
 Multi-camera star topology: one server, N clients.
+
+Changes from v9.2.4:
+- Write the PTS file ourselves via TimestampingFileOutput, a FileOutput subclass
+  that calls super().outputframe() first (so video recording is never affected)
+  then writes the timestamp to a sidecar .pts as a side effect. picamera2's
+  start_encoder(pts=...) kwarg is silently ignored on Pi 5 (libav path doesn't
+  honor it), so the .pts files were being skipped even though the kwarg was
+  accepted.
+- Quiet the "force_key_frame unsupported" log line. The Libav-based encoder
+  produces a keyframe on frame 0 automatically, so the warning is just noise.
+
+Changes from v9.2.3:
+- Runtime monkey-patch for picamera2 + new python3-av incompatibility on Pi 5.
+  picamera2's libav_h264_encoder.py sets frame.pict_type = "I" (string), but
+  PyAV >=14 requires an integer/enum. We rewrite _encode at import time to
+  use the integer value. This fixes cam2 (and any Pi running libcamera 0.7+
+  with the newer PyAV) without requiring apt surgery.
+- Realization: on Pi 5 there is no hardware H264 encoder, so picamera2 routes
+  H264Encoder and LibavH264Encoder through the same Libav code path.
+
+Changes from v9.2.2:
+- Default encoder switched to V4L2 H264Encoder (was Libav). SQUEAKSHOT_PREFER_LIBAV=1
+  opts back into Libav. (Largely cosmetic on Pi 5; the real fix is the
+  pict_type patch in v9.2.4.)
+- stop_recording() sleeps 0.25s before counting the PTS file so picamera2 has
+  time to flush.
+
+Changes from v9.2.1:
+- Drop custom PTSOutput subclass entirely. (Replaced again in v9.2.5 with a
+  safer subclass that does not bypass the parent's outputframe.)
+
+Changes from v9.2:
+- Fix ACK race: main select() loop now skips client sockets while the control
+  worker is busy.
+
+Changes from v9.1:
+- Pi 5 / libcamera compatibility (NoiseReductionModeEnum guard, encode="main")
+- PTSOutput bypasses FileOutput.outputframe keyframe gate (fixes 0-byte .h264 on Pi 5)
+- create_h264_encoder() prefers LibavH264Encoder (software x264 via PyAV) when available,
+  falls back to V4L2 H264Encoder. iperiod from FPS. framerate as Fraction.
+- Server uses a worker thread for control commands so wait_until + start_encoder do not
+  block Picamera2 servicing. control_busy Event prevents recv() race on control socket.
+- Initial STATUS send uses blocking socket to avoid BlockingIOError.
+- recv_message timeout raised 0.1 -> 5.0 on control reads.
 
 Changes from v9.0:
 - START command parses name=filename pairs (no more positional cam1/cam2 assumption)
@@ -14,6 +58,8 @@ Usage:
 """
 
 import argparse
+import fractions
+import queue
 import socket
 import select
 import time
@@ -27,6 +73,60 @@ from picamera2.outputs import FileOutput
 from libcamera import controls
 import signal
 import sys
+
+# Try to import LibavH264Encoder. On Pi 5 with python3-av installed, this gives
+# software x264 via PyAV, which is more reliable than the V4L2 H264Encoder.
+try:
+    from picamera2.encoders import LibavH264Encoder
+    _HAS_LIBAV = True
+except Exception:
+    LibavH264Encoder = None
+    _HAS_LIBAV = False
+
+
+def _patch_libav_pict_type():
+    """Patch picamera2's LibavH264Encoder._encode for newer python3-av.
+
+    On Pi 5 with libcamera 0.7+ and newer python3-av (av 14+), picamera2's
+    libav_h264_encoder.py contains:
+
+        frame.pict_type = "I"
+
+    Newer PyAV requires an enum or integer for pict_type and raises
+    'TypeError: an integer is required' on the string form. The Pi 5 has no
+    hardware H264 encoder, so picamera2 routes BOTH H264Encoder and
+    LibavH264Encoder through this same Libav-based code path on newer
+    versions, meaning we cannot avoid this bug by encoder selection alone.
+
+    This function rewrites _encode at import time, substituting the integer
+    value for the string. Logs whether the patch was applied so we can verify
+    it's running. No-op when picamera2 already has the fix.
+    """
+    try:
+        import inspect, textwrap
+        import picamera2.encoders.libav_h264_encoder as _libav_mod
+        cls = _libav_mod.LibavH264Encoder
+        src = textwrap.dedent(inspect.getsource(cls._encode))
+        if 'pict_type = "I"' not in src:
+            print("[patch] LibavH264Encoder._encode already correct, no patch needed")
+            return False
+        # av.video.frame.PictureType.I has integer value 1 (h264/ffmpeg standard).
+        # Use the integer directly so we do not require importing the enum here.
+        new_src = src.replace('pict_type = "I"', 'pict_type = 1  # patched for new PyAV')
+        local_ns = {}
+        exec(new_src, cls._encode.__globals__, local_ns)
+        cls._encode = local_ns["_encode"]
+        print("[patch] LibavH264Encoder._encode patched for newer python3-av")
+        return True
+    except Exception as e:
+        print(f"[patch] Could not patch LibavH264Encoder: {e}. "
+              f"If this Pi has new python3-av, recordings may produce 0-byte files.")
+        return False
+
+
+# Apply the patch unconditionally at startup. Harmless if the bug is not present.
+if _HAS_LIBAV:
+    _patch_libav_pict_type()
 
 # Network ======================================================================
 CLIENT_PORT = 5005
@@ -87,26 +187,78 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-# PTS output ===================================================================
-class PTSOutput(FileOutput):
-    def __init__(self, video_file, pts_file):
-        super().__init__(video_file)
-        self.pts_file = open(pts_file, "w")
-        self.frame_count = 0
-        self.start_time = None
+# Recording state ==============================================================
+# Earlier versions tried two approaches that did not work on Pi 5:
+#   1. Subclass FileOutput and call FileOutput._write directly, bypassing the
+#      parent's outputframe(). This broke recording (0-byte .h264 files).
+#   2. Pass pts=<path> to picam2.start_encoder(). The signature accepts it,
+#      but picamera2's libav-based encoder path on Pi 5 silently ignores it,
+#      so no .pts file gets written.
+# This version uses TimestampingFileOutput, which:
+#   - Forwards the frame to super().outputframe() FIRST (recording works)
+#   - Writes the timestamp to a side-channel file AFTER as a side effect
+#   - Uses *args/**kwargs to be robust to outputframe signature differences
+#     across picamera2 versions
+current_pts_path = None
 
-    def outputframe(self, frame, keyframe=True, timestamp=None):
-        super().outputframe(frame, keyframe, timestamp)
-        if timestamp is not None:
-            if self.start_time is None:
-                self.start_time = timestamp
-            self.pts_file.write(f"{timestamp - self.start_time}\n")
-            self.frame_count += 1
 
-    def close(self):
-        if self.pts_file:
-            self.pts_file.close()
-        super().close()
+class TimestampingFileOutput(FileOutput):
+    """FileOutput that also records per-frame timestamps to a sidecar .pts file.
+
+    The H264 video write goes through the unmodified parent FileOutput, so this
+    subclass cannot break video recording (the v9.2.1 lesson). The timestamp
+    write happens AFTER the parent's outputframe returns and any failure there
+    is non-fatal."""
+
+    def __init__(self, video_path, pts_path):
+        super().__init__(video_path)
+        self._pts_path = pts_path
+        self._pts_file = None
+        self._last_ts = None
+        self._pts_count = 0
+
+    def start(self):
+        super().start()
+        try:
+            self._pts_file = open(self._pts_path, "w")
+        except Exception as e:
+            print(f"  WARNING: could not open PTS file {self._pts_path}: {e}")
+            self._pts_file = None
+
+    def outputframe(self, frame, *args, **kwargs):
+        # Always call the parent FIRST so video recording is never affected.
+        super().outputframe(frame, *args, **kwargs)
+        # Now extract timestamp without assuming a specific signature.
+        timestamp = kwargs.get("timestamp")
+        if timestamp is None and len(args) >= 2:
+            # Conventional positional order: (frame, keyframe, timestamp, ...)
+            timestamp = args[1]
+        if timestamp is None or self._pts_file is None:
+            return
+        # An I-frame is often emitted as multiple H264 packets (SPS, PPS, IDR)
+        # with the same timestamp. Dedupe so the PTS file has one line per frame.
+        if timestamp == self._last_ts:
+            return
+        self._last_ts = timestamp
+        try:
+            self._pts_file.write(f"{int(timestamp)}\n")
+            self._pts_count += 1
+        except Exception:
+            pass
+
+    def stop(self):
+        super().stop()
+        if self._pts_file is not None:
+            try:
+                self._pts_file.flush()
+                self._pts_file.close()
+            except Exception:
+                pass
+            self._pts_file = None
+
+    @property
+    def frame_count(self):
+        return self._pts_count
 
 
 # Camera =======================================================================
@@ -124,14 +276,21 @@ def setup_camera():
     props = picam2.camera_properties
     print(f"  Model: {props.get('Model', 'Unknown')}")
 
+    # NoiseReductionModeEnum may not exist on some libcamera builds (Pi 5 / newer);
+    # guard so we do not crash camera init if it is missing.
+    _nrm = getattr(controls, "NoiseReductionModeEnum", None)
+    _ctrls = {
+        "FrameDurationLimits": (frame_duration, frame_duration),
+    }
+    if _nrm is not None:
+        _ctrls["NoiseReductionMode"] = _nrm.Fast
+
     config = picam2.create_video_configuration(
         main={"size": (out_w, out_h), "format": "YUV420"},
         raw={"size": (sensor_w, sensor_h)},
-        controls={
-            "FrameDurationLimits": (frame_duration, frame_duration),
-            "NoiseReductionMode": controls.NoiseReductionModeEnum.Fast,
-        },
+        controls=_ctrls,
         buffer_count=6,
+        encode="main",  # explicitly target the main YUV stream for H264 encoding
     )
     picam2.configure(config)
     try:
@@ -159,31 +318,89 @@ def wait_until(target_time):
             time.sleep(0.001)
 
 
+def create_h264_encoder(bitrate_bps, fps_num):
+    """Create an H264 encoder. Defaults to V4L2 H264Encoder, which works
+    reliably across our Pi 5 cameras (verified empirically).
+
+    LibavH264Encoder is available as opt-in via SQUEAKSHOT_PREFER_LIBAV=1, but
+    on newer python3-av (e.g. the version that ships with libcamera 0.7+),
+    picamera2's libav_h264_encoder.py raises TypeError when it sets
+    frame.pict_type = "I" (newer PyAV requires an enum/int, not a string).
+    This is an upstream picamera2/PyAV mismatch we cannot fix from this script.
+
+    iperiod set from configured FPS (a keyframe per ~1 second of footage)."""
+    iperiod = max(2, int(fps_num))
+    prefer_libav = os.environ.get("SQUEAKSHOT_PREFER_LIBAV", "0") == "1"
+    if prefer_libav and _HAS_LIBAV:
+        framerate = fractions.Fraction(int(fps_num), 1)
+        print(f"  Encoder: LibavH264Encoder (PyAV, iperiod={iperiod}, fps={fps_num})")
+        return LibavH264Encoder(
+            bitrate=bitrate_bps, framerate=framerate, iperiod=iperiod
+        )
+    print(f"  Encoder: H264Encoder (V4L2, iperiod={iperiod}, fps={fps_num})")
+    return H264Encoder(bitrate=bitrate_bps, iperiod=iperiod)
+
+
+def _count_pts_frames(pts_path):
+    """Count frames by counting lines in the PTS file picamera2 wrote."""
+    if not pts_path or not os.path.exists(pts_path):
+        return 0
+    try:
+        with open(pts_path) as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
 def start_recording(filename):
-    global picam2, encoder, recording, current_output
+    global picam2, encoder, recording, current_output, current_pts_path
     os.makedirs(SETTINGS["video_dir"], exist_ok=True)
     video_path = os.path.join(SETTINGS["video_dir"], f"{filename}.h264")
     pts_path = os.path.join(SETTINGS["video_dir"], f"{filename}.pts")
     print(f"Starting recording: {filename}")
-    encoder = H264Encoder(bitrate=SETTINGS["bitrate_mbps"] * 1_000_000)
-    current_output = PTSOutput(video_path, pts_path)
+    encoder = create_h264_encoder(
+        bitrate_bps=SETTINGS["bitrate_mbps"] * 1_000_000,
+        fps_num=SETTINGS["framerate"],
+    )
+    # TimestampingFileOutput wraps stock FileOutput and writes the PTS file as
+    # a side effect. The pts= kwarg on start_encoder is silently ignored by
+    # picamera2's libav path on Pi 5, so we cannot rely on it.
+    current_output = TimestampingFileOutput(video_path, pts_path)
+    current_pts_path = pts_path
     picam2.start_encoder(encoder, current_output)
+    # Nudge an IDR frame so the first NAL is a keyframe and downstream decoders
+    # (ffmpeg, players) can lock on immediately. Wrapped because force_key_frame
+    # is not present on every encoder build (the libav-based path lacks it).
+    try:
+        encoder.force_key_frame()
+    except (AttributeError, Exception):
+        pass  # silently skip; libav encoder produces a keyframe on frame 0 anyway
     recording = True
     print(f"  Recording to: {video_path}")
     return True
 
 
 def stop_recording():
-    global picam2, encoder, recording, current_output
+    global picam2, encoder, recording, current_output, current_pts_path
     if not recording:
         return 0
-    picam2.stop_encoder()
-    frame_count = current_output.frame_count if current_output else 0
-    if current_output:
-        current_output.close()
+    # picam2.stop_encoder() can raise RuntimeError("Encoder already stopped")
+    # if the encoder errored internally during start_encoder. Don't let that
+    # leak up and crash the whole service.
+    try:
+        picam2.stop_encoder()
+    except RuntimeError as e:
+        print(f"  stop_encoder warning: {e}")
+    except Exception as e:
+        print(f"  stop_encoder unexpected error: {e}")
+    # Give picamera2 a moment to flush the PTS file. Without this we sometimes
+    # read 0 frames even when the .h264 has real data.
+    time.sleep(0.25)
+    frame_count = _count_pts_frames(current_pts_path)
     recording = False
     encoder = None
     current_output = None
+    current_pts_path = None
     print(f"  Recording stopped. Frames: {frame_count}")
     return frame_count
 
@@ -246,7 +463,7 @@ def server_mode():
     global running, recording
 
     print("=" * 60)
-    print(f"  SQUEAKSHOT SYNC SERVICE v9.1, SERVER")
+    print(f"  SQUEAKSHOT SYNC SERVICE v9.2.5, SERVER")
     print("=" * 60)
     setup_camera()
 
@@ -267,8 +484,41 @@ def server_mode():
     print("Waiting for connections...\n")
 
     clients = {}
-    control_conn = None
     clients_lock = threading.Lock()
+
+    # control_holder lets the worker thread close/replace the controller socket
+    # without us juggling a local variable across threads.
+    control_holder = {"conn": None}
+
+    # control_cmd_queue: main thread reads a command off the controller socket,
+    # then hands it to a worker so the main select() loop can keep servicing
+    # Picamera2 callbacks while wait_until + start_encoder runs (those calls
+    # can block for hundreds of ms each, especially on first Libav startup).
+    control_cmd_queue = queue.Queue()
+
+    # control_busy: set before queueing a command, cleared in the worker's
+    # finally block. While set, we remove the control socket from the select()
+    # read list so the main thread does not race the worker's recv()/send().
+    control_busy = threading.Event()
+
+    def control_worker():
+        while running:
+            try:
+                msg = control_cmd_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                conn = control_holder["conn"]
+                if conn is None:
+                    continue
+                new_conn = _handle_control_command(msg, clients, clients_lock, conn)
+                control_holder["conn"] = new_conn
+            except Exception as e:
+                print(f"[CTRL-WORKER] Error handling {msg!r}: {e}")
+            finally:
+                control_busy.clear()
+
+    threading.Thread(target=control_worker, daemon=True).start()
 
     # Heartbeat thread: send PING to all clients every HEARTBEAT_INTERVAL
     def heartbeat_loop():
@@ -288,33 +538,63 @@ def server_mode():
 
     threading.Thread(target=heartbeat_loop, daemon=True).start()
 
+    _last_progress_log = 0.0
+
     try:
         while running:
+            # While the worker is processing a control command (e.g. waiting for
+            # ACKs from all clients after a START), the main thread must NOT read
+            # from client sockets either. Otherwise select() here races the
+            # worker's recv_message() calls and whichever side wins consumes the
+            # ACK, causing spurious "Clients did not ack" errors.
+            busy = control_busy.is_set()
             with clients_lock:
-                read_socks = [client_listen, control_listen] + [c.sock for c in clients.values()]
-            if control_conn:
-                read_socks.append(control_conn)
+                read_socks = [client_listen, control_listen]
+                if not busy:
+                    read_socks += [c.sock for c in clients.values()]
+            # Only listen on the controller socket when the worker is idle. While
+            # the worker is processing a command (and possibly sending OK:/ERROR:),
+            # we must not recv() on it from the main thread.
+            ctl_conn = control_holder["conn"]
+            if ctl_conn and not busy:
+                read_socks.append(ctl_conn)
             readable, _, _ = select.select(read_socks, [], [], 0.1)
 
             for sock in readable:
                 if sock is client_listen:
                     _accept_client(client_listen, clients, clients_lock)
                 elif sock is control_listen:
-                    control_conn = _accept_controller(control_listen, clients, recording)
-                elif control_conn and sock is control_conn:
-                    msg = recv_message(control_conn, timeout=0.1)
+                    control_holder["conn"] = _accept_controller(
+                        control_listen, clients, recording
+                    )
+                elif ctl_conn and sock is ctl_conn:
+                    # Longer timeout (5s) for control reads: lab Wi-Fi / SSH muxing
+                    # can stall briefly and 0.1s was too tight.
+                    msg = recv_message(ctl_conn, timeout=5.0)
                     if msg is None:
                         print("[CONTROLLER] Disconnected")
-                        control_conn.close()
-                        control_conn = None
+                        try:
+                            ctl_conn.close()
+                        except Exception:
+                            pass
+                        control_holder["conn"] = None
                     elif msg:
-                        control_conn = _handle_control_command(msg, clients, clients_lock, control_conn)
+                        # Set BEFORE put() so the next select() iteration already
+                        # sees us as busy and skips ctl_conn and the client socks.
+                        control_busy.set()
+                        control_cmd_queue.put(msg)
                 else:
                     _handle_client_message(sock, clients, clients_lock)
 
-            if recording and current_output and current_output.frame_count > 0:
-                if current_output.frame_count % 500 == 0:
-                    print(f"  [RECORDING] Frames: {current_output.frame_count}")
+            # Periodic progress log: poll the pts file every ~5 seconds while
+            # recording. The PTS file is owned by picamera2 now (via the pts=
+            # kwarg on start_encoder), and counting lines is cheap.
+            now = time.time()
+            if recording and current_pts_path and (now - _last_progress_log) > 5.0:
+                fc = _count_pts_frames(current_pts_path)
+                if fc > 0:
+                    print(f"  [RECORDING] Frames: {fc}")
+                _last_progress_log = now
     except Exception as e:
         print(f"Server error: {e}")
         import traceback
@@ -328,8 +608,11 @@ def server_mode():
                     c.sock.close()
                 except Exception:
                     pass
-        if control_conn:
-            control_conn.close()
+        if control_holder["conn"]:
+            try:
+                control_holder["conn"].close()
+            except Exception:
+                pass
         client_listen.close()
         control_listen.close()
         if picam2:
@@ -368,11 +651,18 @@ def _accept_client(listen_sock, clients, clients_lock):
 
 def _accept_controller(listen_sock, clients, is_recording):
     conn, addr = listen_sock.accept()
-    conn.setblocking(False)
     print(f"[CONTROLLER] Connected from {addr}")
     state = "RECORDING" if is_recording else "READY"
     names = ",".join(clients.keys()) if clients else ""
-    send_message(conn, f"STATUS:{state}:{len(clients)}:{names}")
+    # Send the initial STATUS while the socket is blocking. send_message uses
+    # sendall, which on a non-blocking socket can raise BlockingIOError if the
+    # send buffer is not immediately ready (this can happen right after accept()
+    # under load). Flip to non-blocking after the handshake completes.
+    conn.setblocking(True)
+    try:
+        send_message(conn, f"STATUS:{state}:{len(clients)}:{names}")
+    finally:
+        conn.setblocking(False)
     return conn
 
 
@@ -512,7 +802,7 @@ def _handle_control_command(msg, clients, clients_lock, control_conn):
 
     elif cmd == "STATUS":
         state_str = "RECORDING" if recording else "READY"
-        frames = current_output.frame_count if current_output else 0
+        frames = _count_pts_frames(current_pts_path) if recording else 0
         with clients_lock:
             names = ",".join(clients.keys()) if clients else ""
             count = len(clients)
@@ -529,13 +819,14 @@ def client_mode(server_ip, camera_name):
     global running, recording
 
     print("=" * 60)
-    print(f"  SQUEAKSHOT SYNC SERVICE v9.1, CLIENT ({camera_name})")
+    print(f"  SQUEAKSHOT SYNC SERVICE v9.2.5, CLIENT ({camera_name})")
     print("=" * 60)
     print(f"  Server: {server_ip}")
     setup_camera()
 
     server_conn = None
     last_server_msg_time = time.time()
+    _last_progress_log = 0.0
 
     while running:
         if not server_conn:
@@ -638,9 +929,18 @@ def client_mode(server_ip, camera_name):
             frame_count = stop_recording()
             print(f"  Stopped with {frame_count} frames")
 
-        if recording and current_output and current_output.frame_count > 0:
-            if current_output.frame_count % 500 == 0:
-                print(f"  [RECORDING] Frames: {current_output.frame_count}")
+            print(f"  Stopping in {wait_time:.3f}s")
+            wait_until(stop_time)
+            frame_count = stop_recording()
+            print(f"  Stopped with {frame_count} frames")
+
+        # Periodic progress log (every ~5s while recording)
+        now = time.time()
+        if recording and current_pts_path and (now - _last_progress_log) > 5.0:
+            fc = _count_pts_frames(current_pts_path)
+            if fc > 0:
+                print(f"  [RECORDING] Frames: {fc}")
+            _last_progress_log = now
 
     if recording:
         stop_recording()

@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """
-SqueakShot Camera Controller v9.1
+SqueakShot Camera Controller v9.2
+
+Changes from v9.1:
+- SQUEAKSHOT_PORT env var (default 5000) for Flask UI; avoids AirPlay clash on Mac
+- SQUEAKSHOT_PREFLIGHT_CLOCK_SKEW_MS env var (clamped 50..2000, default 100)
+- start_sync_services waits up to 60s for cam0:5006 with progress logs
+  (libcamera + Picamera2 + Libav cold start can take 30s+)
+- START reply timeout 15s -> 60s (first Libav encoder start is slow)
+- Encode skips 0-byte .h264 with a clear journalctl hint instead of cryptic
+  ffmpeg "Invalid data" error
+- ffmpeg called with -hide_banner -loglevel error; failure log shows last 1500
+  chars of stderr (real errors, not version banner)
+- Server reply already prefixed with ERROR: is logged once (no ERROR: ERROR:)
 
 Changes from v9.0:
 - START protocol uses name=filename pairs so renamed cameras work
@@ -54,7 +66,23 @@ DEFAULT_CONFIG = {
 CONTROL_PORT = 5006
 PREVIEW_PORT = 8080
 CONNECTION_CHECK_INTERVAL = 15
-PREFLIGHT_CLOCK_SKEW_WARN_MS = 100
+
+# Flask serving port for the controller UI. macOS AirPlay receiver claims port 5000
+# by default but most users keep it disabled; if you collide with anything else,
+# set SQUEAKSHOT_PORT before launch (export SQUEAKSHOT_PORT=5050 etc).
+SQUEAKSHOT_PORT = int(os.environ.get("SQUEAKSHOT_PORT", "5000"))
+
+# Default 100 ms is fine for a healthy chrony / systemd-timesyncd setup. Some labs
+# see a stable but slightly higher offset (Mac controller vs Pi over SSH timing
+# measurement is noisy). Set SQUEAKSHOT_PREFLIGHT_CLOCK_SKEW_MS to override.
+_clock_env = os.environ.get("SQUEAKSHOT_PREFLIGHT_CLOCK_SKEW_MS")
+if _clock_env:
+    try:
+        PREFLIGHT_CLOCK_SKEW_WARN_MS = max(50, min(2000, int(_clock_env)))
+    except ValueError:
+        PREFLIGHT_CLOCK_SKEW_WARN_MS = 100
+else:
+    PREFLIGHT_CLOCK_SKEW_WARN_MS = 100
 PREFLIGHT_MIN_FREE_GB = 30
 
 
@@ -452,17 +480,26 @@ def start_sync_services():
         if not ok:
             add_log("server", f"  {c['name']} start failed: {err.strip()[:200]}")
     time.sleep(1.5)
-    add_log("server", "Connecting to control port...")
-    for _ in range(5):
-        sock = connect_to_control_port(server["ip"], timeout=5)
+    # Camera init (libcamera + Picamera2.start_encoder on first Libav run) can
+    # take 30s+ on a Pi 5 from cold start. Retry far longer than v9.1 did, with
+    # informative log lines so the UI does not look hung.
+    add_log("server", "Connecting to control port (camera init can take 30s+)...")
+    max_wait_s = 60
+    waited = 0
+    while waited < max_wait_s:
+        sock = connect_to_control_port(server["ip"], timeout=3)
         if sock:
             with state_lock:
                 state["control_socket"] = sock
                 state["service_running"] = True
-            add_log("server", "Services ready")
+            add_log("server", f"Services ready ({waited}s)")
             return True
-        time.sleep(1)
-    add_log("server", "ERROR: could not reach control port after starting services")
+        if waited and waited % 10 == 0:
+            add_log("server", f"  Still waiting for cam0:{CONTROL_PORT} ({waited}s elapsed)...")
+        time.sleep(2)
+        waited += 2
+    add_log("server", f"ERROR: could not reach control port after {max_wait_s}s. "
+                      f"Check 'journalctl -u squeakshot-record -n 50' on {server['name']}.")
     return False
 
 
@@ -522,13 +559,17 @@ def start_recording_thread():
             with state_lock:
                 state["is_recording"] = False
             return
-        response = recv_control_message(control_socket, timeout=15)
+        # 60s timeout: first START after a cold boot triggers Libav encoder init on
+        # every Pi, which can take many seconds. v9.1's 15s timed out spuriously.
+        response = recv_control_message(control_socket, timeout=60)
         if response and response.startswith("OK"):
             with state_lock:
                 state["start_time"] = time.time()
             add_log("server", "Recording started across all cameras")
         else:
-            add_log("server", f"ERROR: {response}")
+            # Avoid logging "ERROR: ERROR:..." when the server already prefixed.
+            msg = response if (response and response.startswith("ERROR:")) else f"ERROR: {response}"
+            add_log("server", msg)
             with state_lock:
                 state["is_recording"] = False
     except Exception as e:
@@ -893,8 +934,18 @@ def api_encode_start():
         if not os.path.exists(h264):
             add_log("encode", f"  SKIP {c['name']}: H264 missing")
             return
+        # Catch the empty-recording case explicitly. If the Pi produced a 0-byte
+        # .h264, ffmpeg fails with an opaque "Invalid data found" error; flag it
+        # with a useful hint instead.
+        if os.path.getsize(h264) == 0:
+            add_log("encode",
+                    f"  SKIP {c['name']}: H264 is 0 bytes. The Pi service likely failed "
+                    f"to write any frames. Check 'journalctl -u squeakshot-record -n 100' "
+                    f"on {c['name']} for encoder errors.")
+            return
         add_log("encode", f"  Encoding {c['name']}...")
-        cmd = ["ffmpeg", "-y", "-framerate", str(fps), "-i", h264,
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+               "-y", "-framerate", str(fps), "-i", h264,
                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                "-r", str(fps), "-movflags", "+faststart", mp4]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
@@ -907,7 +958,10 @@ def api_encode_start():
                 os.remove(h264)
                 add_log("encode", f"  Deleted {c['name']} H264")
         else:
-            add_log("encode", f"  FAILED {c['name']}: {result.stderr[:200]}")
+            # Trim to last 1500 chars of stderr (with -loglevel error, this is real
+            # diagnostic content rather than the version banner).
+            err_tail = (result.stderr or "").strip()[-1500:]
+            add_log("encode", f"  FAILED {c['name']}: {err_tail}")
 
     def encode_all():
         try:
@@ -1244,7 +1298,7 @@ def api_open_folder():
 # Main =========================================================================
 if __name__ == "__main__":
     print("=" * 50)
-    print("SqueakShot Camera Controller v9.1")
+    print("SqueakShot Camera Controller v9.2")
     print("=" * 50)
     cfg = load_config()
     print(f"Cameras configured: {len(get_cameras(cfg))}")
@@ -1253,9 +1307,11 @@ if __name__ == "__main__":
     print(f"FFmpeg: {check_ffmpeg()}")
     print(f"Local video dir: {get_local_video_dir()}")
     print(f"Disk log: {os.path.abspath(os.path.join(LOG_DIR, 'controller.log'))}")
+    print(f"Clock skew threshold: {PREFLIGHT_CLOCK_SKEW_WARN_MS} ms")
     print("=" * 50)
-    print("Web interface: http://localhost:5000")
+    print(f"Web interface: http://localhost:{SQUEAKSHOT_PORT}")
+    print("(set SQUEAKSHOT_PORT to override the default 5000)")
     print("=" * 50)
-    _disk_logger.info("Controller started")
+    _disk_logger.info(f"Controller started on port {SQUEAKSHOT_PORT}")
     threading.Thread(target=update_connection_cache_background, daemon=True).start()
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=SQUEAKSHOT_PORT, debug=False, threaded=True)

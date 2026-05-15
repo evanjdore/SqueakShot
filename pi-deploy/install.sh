@@ -48,12 +48,15 @@ fi
 echo "Server IP: $SERVER_IP"
 echo ""
 
+# Every ssh inside this loop MUST use -n (read stdin from /dev/null). Otherwise
+# ssh inherits the while loop's stdin (the cameras.tsv file) and slurps the rest
+# of it, causing only the first camera to be deployed.
 while IFS=$'\t' read -r CAM_NAME CAM_IP CAM_USER CAM_ROLE; do
     echo "============================================================"
     echo " Deploying to $CAM_NAME ($CAM_ROLE) at $CAM_USER@$CAM_IP"
     echo "============================================================"
 
-    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$CAM_USER@$CAM_IP" "echo OK" >/dev/null 2>&1; then
+    if ! ssh -n -o ConnectTimeout=5 -o BatchMode=yes "$CAM_USER@$CAM_IP" "echo OK" >/dev/null 2>&1; then
         echo "  X SSH failed. Set up keys: ssh-copy-id $CAM_USER@$CAM_IP"
         continue
     fi
@@ -63,7 +66,7 @@ while IFS=$'\t' read -r CAM_NAME CAM_IP CAM_USER CAM_ROLE; do
     scp -q "$SCRIPT_DIR/sync_capture.py"   "$CAM_USER@$CAM_IP:/home/$CAM_USER/sync_capture.py"
     scp -q "$SCRIPT_DIR/camera_preview.py" "$CAM_USER@$CAM_IP:/home/$CAM_USER/camera_preview.py"
     scp -q "/tmp/squeakshot_settings.json" "$CAM_USER@$CAM_IP:/home/$CAM_USER/camera_settings.json"
-    ssh "$CAM_USER@$CAM_IP" "chmod +x /home/$CAM_USER/sync_capture.py /home/$CAM_USER/camera_preview.py"
+    ssh -n "$CAM_USER@$CAM_IP" "chmod +x /home/$CAM_USER/sync_capture.py /home/$CAM_USER/camera_preview.py"
     echo "  + Scripts deployed"
 
     TMP_RECORD=$(mktemp)
@@ -82,7 +85,7 @@ while IFS=$'\t' read -r CAM_NAME CAM_IP CAM_USER CAM_ROLE; do
     echo "  -> Installing systemd units..."
     scp -q "$TMP_RECORD"  "$CAM_USER@$CAM_IP:/tmp/squeakshot-record.service"
     scp -q "$TMP_PREVIEW" "$CAM_USER@$CAM_IP:/tmp/squeakshot-preview.service"
-    ssh "$CAM_USER@$CAM_IP" "sudo mv /tmp/squeakshot-record.service /etc/systemd/system/ && \
+    ssh -n "$CAM_USER@$CAM_IP" "sudo mv /tmp/squeakshot-record.service /etc/systemd/system/ && \
                             sudo mv /tmp/squeakshot-preview.service /etc/systemd/system/ && \
                             sudo systemctl daemon-reload && \
                             sudo systemctl stop squeakshot-record squeakshot-preview 2>/dev/null || true && \
@@ -99,7 +102,7 @@ while IFS=$'\t' read -r CAM_NAME CAM_IP CAM_USER CAM_ROLE; do
 /usr/bin/systemctl start squeakshot-record, /usr/bin/systemctl stop squeakshot-record, \
 /usr/bin/systemctl start squeakshot-preview, /usr/bin/systemctl stop squeakshot-preview, \
 /usr/bin/systemctl restart squeakshot-record, /usr/bin/systemctl restart squeakshot-preview"
-    ssh "$CAM_USER@$CAM_IP" "echo '$SUDO_RULE' | sudo tee /etc/sudoers.d/squeakshot >/dev/null && sudo chmod 0440 /etc/sudoers.d/squeakshot"
+    ssh -n "$CAM_USER@$CAM_IP" "echo '$SUDO_RULE' | sudo tee /etc/sudoers.d/squeakshot >/dev/null && sudo chmod 0440 /etc/sudoers.d/squeakshot"
     echo "  + Passwordless sudo for service control configured"
     echo ""
 
