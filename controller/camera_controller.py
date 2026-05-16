@@ -32,6 +32,7 @@ import socket
 import os
 import json
 import time
+import shlex
 import shutil
 import tempfile
 import threading
@@ -228,6 +229,20 @@ def scp_download(ip, user, remote_path, local_path, timeout=300):
         result = subprocess.run(
             ["scp", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
              f"{user}@{ip}:{remote_path}", local_path],
+            capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, result.stderr.decode() if result.stderr else "Unknown error"
+    except Exception as e:
+        return False, str(e)
+
+
+def scp_upload(ip, user, local_path, remote_path, timeout=60):
+    try:
+        result = subprocess.run(
+            ["scp", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no",
+             local_path, f"{user}@{ip}:{remote_path}"],
             capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
@@ -633,6 +648,18 @@ def index():
     return render_template("controller.html")
 
 
+@app.route("/logo.png")
+def logo():
+    """Serve the shared project logo from docs/ so the controller UI and the
+    GitHub README use the same file. Returns 404 if it is missing — the
+    template falls back to a text logo in that case."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    logo_path = os.path.join(repo_root, "docs", "SqueakShotIcon2.png")
+    if os.path.exists(logo_path):
+        return send_file(logo_path, mimetype="image/png")
+    return ("", 404)
+
+
 @app.route("/api/config", methods=["GET"])
 def api_get_config():
     return jsonify(load_config())
@@ -645,6 +672,74 @@ def api_save_config():
         cfg["cameras"] = [c for c in cfg["cameras"] if c.get("ip", "").strip()]
     save_config(cfg)
     return jsonify({"success": True})
+
+
+@app.route("/api/deploy_settings", methods=["POST"])
+def api_deploy_settings():
+    """Push the current camera settings to every Pi and restart the record
+    service where it is already running, so the Settings tab actually takes
+    effect without re-running pi-deploy/install.sh."""
+    with state_lock:
+        if state["is_recording"]:
+            return jsonify({"error": "Cannot deploy settings while recording"}), 400
+    cfg = load_config()
+    cams = get_cameras(cfg)
+    if not cams:
+        return jsonify({"error": "No cameras configured"}), 400
+
+    # Build the settings file exactly as pi-deploy/install.sh does: the camera
+    # settings plus the remote video_dir. This is what sync_capture.py reads.
+    settings = dict(cfg.get("camera_settings", {}))
+    settings["video_dir"] = cfg.get("video_dir", DEFAULT_CONFIG["video_dir"])
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tmp:
+        json.dump(settings, tmp, indent=2)
+        tmp_path = tmp.name
+
+    add_log("server", f"Deploying settings to {len(cams)} cameras...")
+
+    def deploy_one(cam):
+        remote = f"/home/{cam['user']}/camera_settings.json"
+        ok, err = scp_upload(cam["ip"], cam["user"], tmp_path, remote, timeout=30)
+        if not ok:
+            return cam["name"], {"ok": False, "message": f"copy failed: {err.strip()[:200]}"}
+        # Restart the record service ONLY if it is already active, so deploying
+        # settings never spuriously starts a recording service. `is-active` is a
+        # plain status query and needs no sudo.
+        _, out, _ = ssh_command(cam["ip"], cam["user"],
+                                "systemctl is-active squeakshot-record", timeout=10)
+        if out.strip() == "active":
+            r_ok, _, r_err = _systemctl(cam["ip"], cam["user"], "restart", "squeakshot-record")
+            if not r_ok:
+                return cam["name"], {"ok": False,
+                                     "message": f"copied, but restart failed: {r_err.strip()[:200]}"}
+            return cam["name"], {"ok": True, "message": "deployed + service restarted"}
+        return cam["name"], {"ok": True, "message": "deployed (service not running)"}
+
+    results = {}
+    try:
+        with ThreadPoolExecutor(max_workers=len(cams)) as pool:
+            for name, info in pool.map(deploy_one, cams):
+                results[name] = info
+                add_log("server", f"  {name}: {info['message']}")
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+    # A record-service restart invalidates any control socket we were holding;
+    # drop it so the next recording reconnects against the fresh service.
+    with state_lock:
+        if state["control_socket"]:
+            try:
+                state["control_socket"].close()
+            except Exception:
+                pass
+            state["control_socket"] = None
+        state["service_running"] = False
+
+    all_ok = all(v["ok"] for v in results.values())
+    return jsonify({"success": all_ok, "results": results})
 
 
 @app.route("/api/test_connection", methods=["POST"])
@@ -857,7 +952,10 @@ def api_delete(name):
     for c in get_cameras(cfg):
         for ext in [".h264", ".pts"]:
             remote = f'{cfg["video_dir"]}/{c["name"]}_{name}{ext}'
-            ok, _, err = ssh_command(c["ip"], c["user"], f"rm -f {remote}", timeout=10)
+            # shlex.quote: `name` comes straight from the URL path, so a crafted
+            # recording name must not be able to break out into shell commands.
+            ok, _, err = ssh_command(c["ip"], c["user"],
+                                     f"rm -f {shlex.quote(remote)}", timeout=10)
             if not ok:
                 errors.append(f"{c['name']}{ext}: {err}")
     if errors:
@@ -874,6 +972,8 @@ def api_encode_download():
         return jsonify({"error": "No recording name"}), 400
     cfg = load_config()
     cams = get_cameras(cfg)
+    if not cams:
+        return jsonify({"error": "No cameras configured"}), 400
     raw_dir = os.path.join(get_local_video_dir(), "raw")
     os.makedirs(raw_dir, exist_ok=True)
     add_log("encode", f"Downloading {name} from {len(cams)} cameras (parallel)...")
@@ -913,14 +1013,16 @@ def api_encode_start():
     delete_h264 = data.get("delete_h264", False)
     if not check_ffmpeg():
         return jsonify({"error": "FFmpeg not found"}), 500
+    cfg = load_config()
+    cams = get_cameras(cfg)
+    if not cams:
+        return jsonify({"error": "No cameras configured"}), 400
     with state_lock:
         if state["is_encoding"]:
             return jsonify({"error": "Encoding already in progress"}), 400
         state["is_encoding"] = True
         state["encode_message"] = "Starting..."
 
-    cfg = load_config()
-    cams = get_cameras(cfg)
     local_dir = get_local_video_dir()
     raw_dir = os.path.join(local_dir, "raw")
     encoded_dir = os.path.join(local_dir, "encoded")
@@ -1069,13 +1171,15 @@ def api_sync_start():
     fps = data.get("fps", 56)
     if not check_ffmpeg():
         return jsonify({"error": "FFmpeg not found"}), 500
+    cfg = load_config()
+    cams = get_cameras(cfg)
+    if not cams:
+        return jsonify({"error": "No cameras configured"}), 400
     with state_lock:
         if state["is_syncing"]:
             return jsonify({"error": "Sync already running"}), 400
         state["is_syncing"] = True
         state["sync_message"] = "Starting..."
-    cfg = load_config()
-    cams = get_cameras(cfg)
     local_dir = get_local_video_dir()
     encoded_dir = os.path.join(local_dir, "encoded")
     synced_dir = os.path.join(local_dir, "synced")
@@ -1107,7 +1211,15 @@ def api_sync_start():
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
                 if result.returncode == 0:
                     add_log("sync", f"  DONE {c['name']}")
-                    selected = pts_list[i][frames]
+                    # The ffmpeg trim above keeps a CONTIGUOUS run of frames
+                    # (-ss start_time + -frames:v len). The PTS sidecar must
+                    # describe the frames actually in the MP4, so slice the same
+                    # contiguous range rather than fancy-indexing the matched
+                    # indices (which can be non-contiguous when frames dropped).
+                    # True frame-exact extraction of a non-contiguous match set
+                    # would need an ffmpeg select filter and is out of scope here.
+                    end_frame = start_frame + len(frames)
+                    selected = pts_list[i][start_frame:end_frame]
                     selected = selected - selected[0]
                     np.savetxt(output_pts, selected, fmt="%d")
                 else:
@@ -1213,8 +1325,12 @@ def api_trim_start():
     fps = data.get("fps", 56)
     if not check_ffmpeg():
         return jsonify({"error": "FFmpeg not found"}), 500
+    if end_frame is None:
+        return jsonify({"error": "end_frame required"}), 400
     cfg = load_config()
     cams = get_cameras(cfg)
+    if not cams:
+        return jsonify({"error": "No cameras configured"}), 400
     local_dir = get_local_video_dir()
     synced_dir = os.path.join(local_dir, "synced")
     trimmed_dir = os.path.join(local_dir, "trimmed")

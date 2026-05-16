@@ -67,6 +67,8 @@ class StreamingHandler(BaseHTTPRequestHandler):
                     with output.condition:
                         output.condition.wait()
                         frame = output.frame
+                    if frame is None:
+                        continue
                     self.wfile.write(b"--FRAME\r\n")
                     self.send_header("Content-Type", "image/jpeg")
                     self.send_header("Content-Length", len(frame))
@@ -82,7 +84,9 @@ class StreamingHandler(BaseHTTPRequestHandler):
             self.end_headers()
             with output.condition:
                 output.condition.wait()
-                self.wfile.write(output.frame)
+                frame = output.frame
+            if frame is not None:
+                self.wfile.write(frame)
         elif self.path == "/status":
             self.send_response(200)
             self.send_header("Content-type", "text/plain")

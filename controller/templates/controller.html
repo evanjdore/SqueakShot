@@ -267,7 +267,7 @@
     <div class="sidebar">
         <div class="sidebar-header">
             <div class="logo-container">
-                <img src="/static/logo.png" alt="SqueakShot" onerror="this.parentElement.innerHTML='<span style=\'font-size:20px;font-weight:700;color:var(--primary)\'>SqueakShot</span>'">
+                <img src="/logo.png" alt="SqueakShot" onerror="this.parentElement.innerHTML='<span style=\'font-size:20px;font-weight:700;color:var(--primary)\'>SqueakShot</span>'">
             </div>
         </div>
         <div class="sidebar-menu">
@@ -372,10 +372,11 @@
                     <button class="btn btn-danger" id="stop-btn" onclick="stopRecording()" disabled style="font-size: 16px; padding: 14px 28px;">
                         <i class="fas fa-stop"></i>Stop Recording
                     </button>
-                    <button class="btn btn-secondary" onclick="runPreflight()" title="Check clock skew and disk space on every Pi">
+                    <button class="btn btn-secondary" id="preflight-btn" onclick="runPreflight()" title="Check clock skew and disk space on every Pi">
                         <i class="fas fa-clipboard-check"></i>Pre-flight Check
                     </button>
                 </div>
+                <div id="preflight-results" style="margin-top: 16px;"></div>
                 <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
                     <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
                         <button class="btn btn-secondary" id="service-start-btn" onclick="startServices()">
@@ -725,13 +726,22 @@
                         <label>Remote Video Directory (on Pis)</label>
                         <input type="text" id="video-dir" value="/home/maiya/camera_videos">
                     </div>
-                    <div class="btn-group">
-                        <button type="button" class="btn btn-secondary" onclick="testConnections()">
+                    <div class="btn-group" style="align-items: center;">
+                        <button type="button" class="btn btn-secondary" id="test-conn-btn" onclick="testConnections()">
                             <i class="fas fa-plug"></i>Test Connections
                         </button>
                         <button type="submit" class="btn btn-success">
                             <i class="fas fa-save"></i>Save Configuration
                         </button>
+                        <button type="button" class="btn btn-primary" id="deploy-btn" onclick="deploySettings()"
+                                title="Save, then copy these settings to every Pi and restart the record service">
+                            <i class="fas fa-paper-plane"></i>Deploy to Pis
+                        </button>
+                        <span id="deploy-needed-badge" style="display:none; padding:6px 12px; border-radius:20px;
+                              font-size:12px; font-weight:600; background:rgba(245,158,11,0.12);
+                              border:1px solid rgba(245,158,11,0.35); color:var(--warning);">
+                            <i class="fas fa-exclamation-triangle"></i> Undeployed changes
+                        </span>
                     </div>
                 </div>
             </form>
@@ -834,12 +844,33 @@
             });
         }
 
-        function updateCamera(idx, field, value) { cameras[idx][field] = value; updateNamingHint(); }
-        function removeCamera(idx) { cameras.splice(idx, 1); renderCameraSettings(); updateNamingHint(); }
+        function updateCamera(idx, field, value) {
+            cameras[idx][field] = value; updateNamingHint(); markDeployDirty();
+        }
+        function removeCamera(idx) {
+            cameras.splice(idx, 1); renderCameraSettings(); updateNamingHint(); markDeployDirty();
+        }
         function addCamera() {
             const next = cameras.length;
             cameras.push({name: `cam${next}`, ip: '', user: 'maiya', role: 'client'});
-            renderCameraSettings(); updateNamingHint();
+            renderCameraSettings(); updateNamingHint(); markDeployDirty();
+        }
+
+        // "Undeployed changes" tracking: the controller's saved config and the
+        // settings files actually on the Pis can diverge. markDeployDirty() is
+        // called on any settings edit; clearDeployDirty() after a successful
+        // deploy. loadConfig() deliberately does NOT touch this, so the badge
+        // survives a plain Save (which updates the controller but not the Pis).
+        let deployDirty = false;
+        function markDeployDirty() {
+            deployDirty = true;
+            const b = document.getElementById('deploy-needed-badge');
+            if (b) b.style.display = 'inline-flex';
+        }
+        function clearDeployDirty() {
+            deployDirty = false;
+            const b = document.getElementById('deploy-needed-badge');
+            if (b) b.style.display = 'none';
         }
 
         function updateNamingHint() {
@@ -849,12 +880,11 @@
             if (names.length) hint.textContent = 'Files: ' + names.join(', ');
         }
 
-        document.getElementById('config-form').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const cfg = {
+        function buildConfig() {
+            return {
                 cameras: cameras,
                 video_dir: document.getElementById('video-dir').value,
-                local_video_dir: currentConfig.local_video_dir,
+                local_video_dir: currentConfig ? currentConfig.local_video_dir : undefined,
                 camera_settings: {
                     output_width: parseInt(document.getElementById('settings-output-width').value),
                     output_height: parseInt(document.getElementById('settings-output-height').value),
@@ -864,38 +894,93 @@
                     bitrate_mbps: parseInt(document.getElementById('settings-bitrate').value),
                 }
             };
+        }
+        async function saveConfig() {
             const r = await fetch('/api/config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(cfg)
+                body: JSON.stringify(buildConfig())
             });
-            if (r.ok) {
+            return r.ok;
+        }
+        document.getElementById('config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (await saveConfig()) {
                 document.getElementById('test-results').innerHTML =
-                    '<div class="alert alert-success"><i class="fas fa-check-circle"></i>Saved</div>';
-                setTimeout(() => document.getElementById('test-results').innerHTML = '', 3000);
+                    '<div class="alert alert-success"><i class="fas fa-check-circle"></i>Saved on the controller. Click "Deploy to Pis" to apply on the cameras.</div>';
+                setTimeout(() => document.getElementById('test-results').innerHTML = '', 5000);
                 loadConfig();
             }
         });
 
         async function testConnections() {
+            const btn = document.getElementById('test-conn-btn');
             const div = document.getElementById('test-results');
+            btn.classList.add('loading'); btn.disabled = true;
             div.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i>Testing...</div>';
-            const r = await fetch('/api/test_connection', {method: 'POST'});
-            const results = await r.json();
-            let html = '<div class="stats-grid">';
-            for (const cam of cameras) {
-                const status = results.cameras[cam.name];
-                const ok = status && status.connected;
-                html += `<div class="stat-card">
-                    <div class="stat-label">${cam.name}</div>
-                    <div class="stat-value">
-                        <span class="connection-indicator ${ok ? 'online' : 'offline'}"></span>
-                        <span>${ok ? 'Connected' : 'Failed'}</span>
-                    </div>
-                </div>`;
+            try {
+                const r = await fetch('/api/test_connection', {method: 'POST'});
+                const results = await r.json();
+                let html = '<div class="stats-grid">';
+                for (const cam of cameras) {
+                    const status = results.cameras[cam.name];
+                    const ok = status && status.connected;
+                    html += `<div class="stat-card">
+                        <div class="stat-label">${cam.name}</div>
+                        <div class="stat-value">
+                            <span class="connection-indicator ${ok ? 'online' : 'offline'}"></span>
+                            <span>${ok ? 'Connected' : 'Failed'}</span>
+                        </div>
+                    </div>`;
+                }
+                html += '</div>';
+                div.innerHTML = html;
+            } catch (e) {
+                div.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>${e}</div>`;
+            } finally {
+                btn.classList.remove('loading'); btn.disabled = false;
             }
-            html += '</div>';
-            div.innerHTML = html;
+        }
+
+        async function deploySettings() {
+            if (!confirm('Save current settings and deploy them to every Pi?\n\n' +
+                         'The record service will restart on any Pi where it is running.')) return;
+            const btn = document.getElementById('deploy-btn');
+            const out = document.getElementById('test-results');
+            btn.classList.add('loading'); btn.disabled = true;
+            out.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i>Saving and deploying to Pis...</div>';
+            try {
+                // Persist the on-screen values first so the controller deploys
+                // exactly what is shown, not whatever was last saved.
+                if (!await saveConfig()) {
+                    out.innerHTML = '<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>Could not save config</div>';
+                    return;
+                }
+                const r = await fetch('/api/deploy_settings', {method: 'POST'});
+                const d = await r.json();
+                if (d.error) {
+                    out.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>${d.error}</div>`;
+                    return;
+                }
+                let cards = '<div class="stats-grid">';
+                for (const [name, info] of Object.entries(d.results || {})) {
+                    cards += `<div class="stat-card"><div class="stat-label">${name}</div>
+                        <div class="stat-value">
+                            <span class="connection-indicator ${info.ok ? 'online' : 'offline'}"></span>
+                            <span style="font-size:13px;">${info.message}</span>
+                        </div></div>`;
+                }
+                cards += '</div>';
+                out.innerHTML = (d.success
+                    ? '<div class="alert alert-success"><i class="fas fa-check-circle"></i>Settings deployed to all cameras</div>'
+                    : '<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>Some cameras failed — see below</div>'
+                ) + cards;
+                if (d.success) clearDeployDirty();
+            } catch (e) {
+                out.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>${e}</div>`;
+            } finally {
+                btn.classList.remove('loading'); btn.disabled = false;
+            }
         }
 
         // ============================================================================
@@ -935,8 +1020,13 @@
                 const sIndicator = document.getElementById('service-indicator');
                 const sText = document.getElementById('service-status-text');
                 if (sIndicator) sIndicator.className = 'connection-indicator ' + (s.service_running ? 'online' : 'offline');
-                if (sText) sText.textContent = s.service_running ? 'Running' : 'Not Running';
-                document.getElementById('service-start-btn').disabled = s.service_running;
+                if (sText) sText.textContent = s.service_running ? 'Running' : (servicesStarting ? 'Starting...' : 'Not Running');
+                const svcStartBtn = document.getElementById('service-start-btn');
+                if (servicesStarting && s.service_running) {
+                    servicesStarting = false;
+                    svcStartBtn.classList.remove('loading');
+                }
+                svcStartBtn.disabled = s.service_running || servicesStarting;
                 document.getElementById('service-stop-btn').disabled = !s.service_running;
 
                 // Preview controls
@@ -1008,20 +1098,37 @@
                 card.innerHTML = `
                     <div class="preview-card-header">
                         <div class="preview-card-title">${c.name}</div>
-                        <span style="font-size:12px;color:var(--text-secondary);">${c.ip}:8080</span>
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            <span style="font-size:12px;color:var(--text-secondary);">${c.ip}:8080</span>
+                            <button class="btn btn-secondary btn-small" title="Reload stream"
+                                    onclick="reloadPreview('${c.name}','${c.ip}')">
+                                <i class="fas fa-sync"></i>
+                            </button>
+                        </div>
                     </div>
                     <div class="preview-card-body">
-                        <img src="http://${c.ip}:8080/stream.mjpg?t=${ts}"
+                        <img id="preview-img-${c.name}" src="http://${c.ip}:8080/stream.mjpg?t=${ts}"
                              onerror="this.style.display='none';this.nextElementSibling.style.display='block';"
                              alt="${c.name} preview">
                         <div class="preview-placeholder" style="display:none;">
                             <i class="fas fa-video-slash" style="font-size: 32px; opacity: 0.5; margin-bottom: 12px;"></i>
                             <div>Preview not active</div>
-                            <div style="font-size: 12px; margin-top: 8px;">Click "Start Previews" above</div>
+                            <div style="font-size: 12px; margin-top: 8px;">Click "Start Previews", or "Reload" once it is running</div>
                         </div>
                     </div>`;
                 grid.appendChild(card);
             });
+        }
+
+        // Re-fetch a single camera's MJPEG stream (cache-busted) without
+        // rebuilding the whole grid — useful when one stream drops.
+        function reloadPreview(name, ip) {
+            const img = document.getElementById('preview-img-' + name);
+            if (!img) return;
+            const placeholder = img.nextElementSibling;
+            if (placeholder) placeholder.style.display = 'none';
+            img.style.display = 'block';
+            img.src = `http://${ip}:8080/stream.mjpg?t=${Date.now()}`;
         }
 
         async function startPreviews() {
@@ -1061,19 +1168,61 @@
             if (!r.ok) { const e = await r.json(); alert('Failed: ' + e.error); }
         }
         async function runPreflight() {
-            const r = await fetch('/api/preflight', {method: 'POST'});
-            const d = await r.json();
-            if (d.warnings && d.warnings.length) {
-                alert('Pre-flight warnings:\n\n' + d.warnings.map(w => '• ' + w).join('\n'));
-            } else {
-                alert('Pre-flight OK on all cameras.');
+            const btn = document.getElementById('preflight-btn');
+            const out = document.getElementById('preflight-results');
+            btn.classList.add('loading'); btn.disabled = true;
+            out.innerHTML = '<div class="alert alert-info"><i class="fas fa-spinner fa-spin"></i>Running pre-flight check on all cameras...</div>';
+            try {
+                const r = await fetch('/api/preflight', {method: 'POST'});
+                renderPreflight(await r.json());
+            } catch (e) {
+                out.innerHTML = `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i>${e}</div>`;
+            } finally {
+                btn.classList.remove('loading'); btn.disabled = false;
             }
+        }
+        function renderPreflight(d) {
+            const out = document.getElementById('preflight-results');
+            let html = d.ok
+                ? '<div class="alert alert-success"><i class="fas fa-check-circle"></i>Pre-flight OK on all cameras</div>'
+                : (d.warnings || []).map(w =>
+                    `<div class="alert alert-warning"><i class="fas fa-exclamation-triangle"></i><div>${w}</div></div>`).join('');
+            html += '<div class="stats-grid">';
+            for (const [name, info] of Object.entries(d.cameras || {})) {
+                const skew = info.clock_skew_ms != null ? `${info.clock_skew_ms.toFixed(0)} ms` : '—';
+                const free = info.free_gb != null ? `${info.free_gb.toFixed(1)} GB` : '—';
+                html += `<div class="stat-card">
+                    <div class="stat-label"><span class="connection-indicator ${info.ok ? 'online' : 'offline'}"></span> ${name}</div>
+                    <div style="font-size:13px;color:var(--text-secondary);">Clock skew: <strong style="color:var(--text-primary);">${skew}</strong></div>
+                    <div style="font-size:13px;color:var(--text-secondary);">Free space: <strong style="color:var(--text-primary);">${free}</strong></div>
+                </div>`;
+            }
+            html += '</div>';
+            out.innerHTML = html;
         }
         async function stopRecording() {
             const r = await fetch('/api/stop', {method: 'POST'});
             if (!r.ok) { const e = await r.json(); alert('Failed: ' + e.error); }
         }
-        async function startServices() { await fetch('/api/services/start', {method: 'POST'}); }
+        // Service startup is a background thread on the controller (camera init
+        // can take 30s+), so the POST returns immediately. Keep the button in a
+        // loading state until updateStatus() sees service_running flip true, or
+        // a safety timeout fires.
+        let servicesStarting = false;
+        async function startServices() {
+            const btn = document.getElementById('service-start-btn');
+            btn.classList.add('loading'); btn.disabled = true;
+            servicesStarting = true;
+            try {
+                await fetch('/api/services/start', {method: 'POST'});
+            } catch (e) { console.error(e); }
+            setTimeout(() => {
+                if (servicesStarting) {
+                    servicesStarting = false;
+                    btn.classList.remove('loading');
+                }
+            }, 75000);
+        }
         async function stopServices() {
             if (!confirm('Stop services?')) return;
             await fetch('/api/services/stop', {method: 'POST'});
@@ -1445,6 +1594,14 @@
         // ============================================================================
         // Boot
         // ============================================================================
+        // Editing any camera-settings field marks the Pis as out of date.
+        ['settings-output-width', 'settings-output-height', 'settings-sensor-width',
+         'settings-sensor-height', 'settings-framerate', 'settings-bitrate', 'video-dir']
+            .forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.addEventListener('input', markDeployDirty);
+            });
+
         loadConfig();
         loadLocalDir();
         updateStatus();

@@ -24,17 +24,16 @@ mkdir -p ~/camera_videos
 
 ### On the desktop controller
 
-- Python 3.10+
-- FFmpeg and FFprobe on the PATH
 - An SSH client that can reach each Pi by IP
 - SSH key set up to each Pi (`ssh-copy-id user@cam0-ip`, etc.)
-
-On macOS:
-```bash
-brew install ffmpeg
-```
-On Windows: download static FFmpeg builds from ffmpeg.org and add the
-`bin/` folder to `Path`.
+- **Recommended:** conda or mamba installed (e.g. via Miniforge). The
+  controller's Python, Flask, NumPy, and FFmpeg/FFprobe all come from an
+  isolated conda environment defined in `environment.yml`, so nothing
+  pollutes your system Python and there is no separate FFmpeg install.
+- **Without conda:** Python 3.10+ on PATH, plus FFmpeg/FFprobe installed
+  yourself — `brew install ffmpeg` on macOS, or static builds from
+  ffmpeg.org added to `Path` on Windows. In this fallback case the launcher
+  pip-installs Flask + NumPy into the current Python.
 
 ## Step 1: Run setup
 
@@ -93,8 +92,18 @@ ssh maiya@<cam-ip> 'sudo systemctl start squeakshot-record'
 SqueakShot.bat           # Windows
 ```
 
-The first launch installs Flask and NumPy via `pip` if missing. Open
-<http://localhost:5000>.
+On the first launch, if conda or mamba is available the launcher creates an
+isolated `squeakshot` environment from `environment.yml` (Python, Flask,
+NumPy, FFmpeg) — expect a minute or two. Subsequent launches reuse it. If
+conda/mamba is not found, it falls back to pip-installing Flask + NumPy into
+the current Python.
+
+To create the environment yourself ahead of time instead:
+```bash
+conda env create -f environment.yml     # or: mamba env create -f environment.yml
+```
+
+Open <http://localhost:5000>.
 
 You should see one status card per camera. If they all show "Online" with
 sensible thermal readings, you are good to go.

@@ -1,0 +1,19 @@
+# Conda / mamba environment for the SqueakShot DESKTOP CONTROLLER.
+#
+# Create it manually with either of:
+#     conda env create -f environment.yml
+#     mamba env create -f environment.yml
+# ...or just run ./SqueakShot.sh (SqueakShot.bat on Windows) — the launchers
+# create this environment automatically on first run.
+#
+# This covers the desktop controller only. The Raspberry Pis use their
+# system picamera2 / libcamera (installed via apt) and are NOT managed by
+# conda — see pi-deploy/ for the Pi side.
+name: squeakshot
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - flask>=2.0
+  - numpy>=1.20
+  - ffmpeg>=6.0      # provides both `ffmpeg` and `ffprobe` on PATH in the env

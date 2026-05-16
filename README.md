@@ -1,39 +1,118 @@
+<p align="center">
+  <img src="docs/SqueakShotIcon2.png" alt="SqueakShot" width="280">
+</p>
+
 # SqueakShot
 
-Synchronized multi-camera video recording for the Raspberry Pi, designed for
-behavioral neuroscience experiments. Records H.264 with per-frame PTS
-timestamps across N cameras with sub-frame synchronization, then provides a
-desktop GUI for encoding, frame-matching, and trimming.
+Synchronized multi-camera video recording for the Raspberry Pi, built for
+behavioral neuroscience experiments where several camera angles of the same
+animal must line up frame-for-frame.
 
-## What's new in v9.1
+A set of Raspberry Pis — one *server* plus any number of *clients* — record
+H.264 video with per-frame microsecond timestamps, all starting at the same
+wall-clock instant. A desktop controller (a small Flask web app) drives the
+whole workflow from one browser UI: previewing, recording, pulling footage off
+the Pis, encoding to MP4, frame-matching the cameras to each other, and
+trimming to the behavior window.
 
-- **N cameras supported** (star topology: cam0 server + N clients)
-- **ISP downscaling** at the Pi for lower bandwidth and processing load
-  without losing field of view
-- **Live preview tab** in the controller GUI (MJPEG streams from each Pi)
-- **systemd-based service management** (no more SSH `nohup ... & disown`)
-- See [CHANGELOG.md](CHANGELOG.md) for full migration notes
+## What it does
+
+The full pipeline, all from `http://localhost:5000`:
+
+1. **Record** — Enter an animal ID and project ID and hit *Start Recording*.
+   Every Pi opens its encoder at the same scheduled moment (see
+   [synchronization](#how-synchronization-works)). Footage lands on each Pi's
+   SD card as a `.h264` file plus a `.pts` sidecar of per-frame timestamps.
+2. **Preview** — Live MJPEG streams from every camera for framing and focus.
+   Mutually exclusive with recording, since the cameras can't be shared.
+3. **Encode** — Download the raw footage from every Pi in parallel and encode
+   each camera to MP4.
+4. **Sync** — Analyze the `.pts` files, match frames across all cameras to
+   within a 20 ms tolerance, and write per-camera *synced* MP4s that begin on
+   the same frame.
+5. **Trim** — Scrub to the start and end of the behavior bout on a frame
+   preview, then clip every camera together to that exact range.
+
+Pre-flight checks (clock skew and free disk on each Pi), live thermal and
+throttling status per camera, and an in-GUI settings deploy round it out.
+
+## What's new
+
+- **v9.2** — Fixes 0-byte `.h264` recordings on the Pi 5, an installer bug
+  that deployed only the first camera, and server-side control-socket races.
+  Adds `SQUEAKSHOT_PORT` and clock-skew environment variables for macOS. Full
+  detail in [CHANGELOG.md](CHANGELOG.md).
+- **Isolated install** — The desktop controller now installs into a
+  conda/mamba environment (`environment.yml`) that also bundles FFmpeg, so
+  nothing touches your system Python and there is no separate FFmpeg download.
+- **Deploy settings from the GUI** — The Settings tab can push camera
+  resolution/fps/bitrate to every Pi and restart the record service, instead
+  of re-running `install.sh`.
+- Inline pre-flight results, per-camera preview reload, and assorted bug
+  fixes (see `CHANGELOG.md`).
 
 ## Hardware
 
-- Two or more Raspberry Pi 4 / 5 with Camera Module 3 (Wide recommended)
-- Wired ethernet between all Pis and the desktop running the controller
-- A desktop with Python 3.10+ and FFmpeg
+- Two or more Raspberry Pi 4 / 5, each with a Camera Module 3 (Wide recommended)
+- Wired Ethernet between every Pi and the desktop running the controller
+- A desktop (Windows / macOS / Linux) for the controller
 
-## Quick start
+## Installation
+
+See [INSTALL.md](INSTALL.md) for the full walkthrough. The short version:
+
+### Prerequisites
+
+**On each Raspberry Pi** — Raspberry Pi OS Bookworm (64-bit), a working Camera
+Module 3, SSH enabled, and `python3-picamera2` + `python3-av` installed (both
+ship on standard images).
+
+**On the desktop** — conda or mamba (recommended, e.g. via Miniforge). The
+controller's Python, Flask, NumPy, and FFmpeg all come from the
+`environment.yml` conda environment. Without conda you instead need Python
+3.10+ and FFmpeg/FFprobe on `PATH` yourself.
+
+You also need passwordless SSH from the desktop to every Pi
+(`ssh-copy-id user@pi-ip`).
+
+### 1. Configure
 
 ```bash
-# 1. One-time config (interactive)
-./setup.sh                   # or setup.bat on Windows
-
-# 2. Deploy capture scripts + systemd units to every Pi listed in config
-cd pi-deploy && ./install.sh
-
-# 3. Launch the controller (auto-installs deps if needed)
-cd .. && ./SqueakShot.sh     # or SqueakShot.bat on Windows
+./setup.sh                   # setup.bat on Windows
 ```
 
-Open <http://localhost:5000> in your browser.
+Interactively asks for each camera's name / IP / SSH user, the video
+directories, and the resolution / fps / bitrate, then writes
+`controller/camera_config.json`.
+
+### 2. Deploy to the Pis
+
+```bash
+cd pi-deploy && ./install.sh
+```
+
+Copies the capture scripts and a generated `camera_settings.json` to every Pi,
+installs the `squeakshot-record` and `squeakshot-preview` systemd services,
+and grants passwordless `systemctl` for just those two units.
+
+### 3. Launch the controller
+
+```bash
+cd .. && ./SqueakShot.sh     # SqueakShot.bat on Windows
+```
+
+On the first run this builds the `squeakshot` conda environment from
+`environment.yml` (a minute or two); later runs reuse it. If conda/mamba is
+not found, it falls back to installing Flask + NumPy with `pip`. Then open
+<http://localhost:5000>.
+
+To build the environment yourself ahead of time:
+
+```bash
+conda env create -f environment.yml      # or: mamba env create -f environment.yml
+```
+
+For day-to-day use after install, see [QUICKSTART.md](QUICKSTART.md).
 
 ## Architecture
 
@@ -60,11 +139,23 @@ Open <http://localhost:5000> in your browser.
                        └──────────┘     └──────────┘
 ```
 
-All cameras share a wall-clock reference. The server schedules a precise
-start time ~3 seconds in the future, sends it to every client, waits for
-ACKs, then everyone busy-waits to that exact moment before opening their
-encoder. PTS files alongside each `.h264` give per-frame microsecond
-timestamps for offline alignment.
+The controller never talks to client cameras directly: it sends one control
+command to the server (cam0), which fans it out to every client. Clients
+identify themselves to the server with a `HELLO:<name>` handshake, so cameras
+are matched by name rather than connection order.
+
+## How synchronization works
+
+All cameras share a wall-clock reference, so keep the Pis on NTP / chrony. On
+*Start Recording* the server schedules a precise start time about 3 seconds in
+the future, sends it to every client, waits for ACKs, then everyone busy-waits
+to that exact instant before opening their encoder. The `.pts` sidecar next to
+each `.h264` records a microsecond timestamp per frame; the Sync stage uses
+those timestamps to match frames across cameras offline, within a 20 ms
+tolerance.
+
+The pre-flight check flags any Pi whose clock is off by more than ~100 ms,
+since skew directly degrades sync quality.
 
 ## Output
 
@@ -85,18 +176,23 @@ mode (full FOV) regardless of `output_width`/`output_height`, and the ISP
 scales down before the encoder sees it. So lowering `output_*` reduces
 encoder load and bandwidth, but keeps the lens view.
 
+Changing these in the **Settings** tab updates the controller's config; click
+**Deploy to Pis** there to copy them to every camera and restart the record
+service so they take effect.
+
 ## Files
 
 ```
 SqueakShot/
 ├── SqueakShot.sh / .bat / .command   # launchers
 ├── setup.sh / .bat                   # interactive config
+├── environment.yml                   # conda/mamba env for the controller
 ├── controller/
 │   ├── camera_controller.py          # Flask app
+│   ├── sync_lib.py                   # shared N-camera frame-matching algorithm
 │   ├── camera_config.example.json    # template config
-│   ├── requirements.txt
-│   ├── templates/controller.html     # web UI
-│   └── static/                       # logo etc.
+│   ├── requirements.txt              # pip fallback deps
+│   └── templates/controller.html     # web UI
 ├── pi-deploy/
 │   ├── sync_capture.py               # capture service (multi-client server / client)
 │   ├── camera_preview.py             # MJPEG preview server
@@ -107,7 +203,10 @@ SqueakShot/
 ├── tools/
 │   └── sync_videos.py                # standalone offline sync tool (GUI + CLI)
 ├── docs/
-│   └── (installation guides etc.)
+│   └── SqueakShotIcon2.png           # project logo (README header + controller UI)
+├── INSTALL.md                        # full installation walkthrough
+├── QUICKSTART.md                     # day-to-day usage
+├── DEPLOYMENT_HISTORY.md             # field notes
 ├── CHANGELOG.md
 └── README.md
 ```
@@ -118,7 +217,7 @@ SqueakShot/
 without a password (set up keys with `ssh-copy-id`).
 
 **Preview shows "not active".** The record service blocks the camera. Click
-"Start Previews" on the Preview tab, it stops the record service first.
+"Start Previews" on the Preview tab — it stops the record service first.
 
 **Recording errors with "Clients did not ack".** Check that the
 `squeakshot-record` service is running on every client Pi:
@@ -132,3 +231,7 @@ If it shows "Permission denied" on systemctl from the controller, re-run
 frames (compare per-camera frame counts in the analysis output). Common
 causes: under-volted Pi (check thermal cards in Recording tab), CPU
 throttling, SD card too slow.
+
+**Settings changes don't take effect.** Editing settings in the GUI only
+updates the controller's config. Use **Deploy to Pis** on the Settings tab (or
+re-run `pi-deploy/install.sh`) to push them to the cameras.

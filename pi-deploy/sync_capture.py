@@ -373,7 +373,7 @@ def start_recording(filename):
     # is not present on every encoder build (the libav-based path lacks it).
     try:
         encoder.force_key_frame()
-    except (AttributeError, Exception):
+    except Exception:
         pass  # silently skip; libav encoder produces a keyframe on frame 0 anyway
     recording = True
     print(f"  Recording to: {video_path}")
@@ -587,8 +587,8 @@ def server_mode():
                     _handle_client_message(sock, clients, clients_lock)
 
             # Periodic progress log: poll the pts file every ~5 seconds while
-            # recording. The PTS file is owned by picamera2 now (via the pts=
-            # kwarg on start_encoder), and counting lines is cheap.
+            # recording. The PTS file is written by TimestampingFileOutput as a
+            # side effect of each frame, and counting lines is cheap.
             now = time.time()
             if recording and current_pts_path and (now - _last_progress_log) > 5.0:
                 fc = _count_pts_frames(current_pts_path)
@@ -924,11 +924,6 @@ def client_mode(server_ip, camera_name):
             stop_time = float(parts[1])
             send_message(server_conn, "ACK")
             wait_time = stop_time - time.time()
-            print(f"  Stopping in {wait_time:.3f}s")
-            wait_until(stop_time)
-            frame_count = stop_recording()
-            print(f"  Stopped with {frame_count} frames")
-
             print(f"  Stopping in {wait_time:.3f}s")
             wait_until(stop_time)
             frame_count = stop_recording()

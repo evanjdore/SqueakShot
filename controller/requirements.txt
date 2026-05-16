@@ -1,2 +1,8 @@
+# Desktop CONTROLLER dependencies — pip fallback only.
+#
+# The preferred install is the conda/mamba environment defined in
+# ../environment.yml, which also bundles ffmpeg/ffprobe. This file is used
+# only when conda/mamba is unavailable; note that pip does NOT install
+# ffmpeg — you must provide it separately in that case.
 flask>=2.0
 numpy>=1.20
