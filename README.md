@@ -5,15 +5,16 @@
 # SqueakShot
 
 Synchronized multi-camera video recording for the Raspberry Pi, built for
-behavioral neuroscience experiments where several camera angles of the same
-animal must line up frame-for-frame.
+behavioral neuroscience experiments (rodent vocalization + behavior, hence the
+name) where several camera angles of the same animal must line up
+frame-for-frame.
 
-A set of Raspberry Pis — one *server* plus any number of *clients* — record
-H.264 video with per-frame microsecond timestamps, all starting at the same
-wall-clock instant. A desktop controller (a small Flask web app) drives the
-whole workflow from one browser UI: previewing, recording, pulling footage off
-the Pis, encoding to MP4, frame-matching the cameras to each other, and
-trimming to the behavior window.
+A set of Raspberry Pi 4 / 5 units — one *server* plus any number of *clients* —
+record H.264 video with per-frame microsecond timestamps, all starting at the
+same wall-clock instant. A desktop controller (a small Flask web app, currently
+**v9.2.5**) drives the whole workflow from one browser UI: previewing,
+recording, pulling footage off the Pis, encoding to MP4, frame-matching the
+cameras to each other, and trimming to the behavior window.
 
 ## What it does
 
@@ -38,24 +39,35 @@ throttling status per camera, and an in-GUI settings deploy round it out.
 
 ## What's new
 
+- **v9.2.5 (current)** — `.pts` sidecars are now written reliably on the Pi 5
+  via a `TimestampingFileOutput` subclass, since `picamera2`'s
+  `start_encoder(pts=...)` is silently ignored on the libav code path. Also
+  ships a runtime monkey-patch for the `picamera2` + PyAV ≥14 incompatibility
+  (`pict_type` must be an int, not the string `"I"`) that otherwise crashes
+  the encoder on newer images. Quiets the bogus "force_key_frame unsupported"
+  log line.
 - **v9.2** — Fixes 0-byte `.h264` recordings on the Pi 5, an installer bug
   that deployed only the first camera, and server-side control-socket races.
-  Adds `SQUEAKSHOT_PORT` and clock-skew environment variables for macOS. Full
-  detail in [CHANGELOG.md](CHANGELOG.md).
-- **Isolated install** — The desktop controller now installs into a
-  conda/mamba environment (`environment.yml`) that also bundles FFmpeg, so
-  nothing touches your system Python and there is no separate FFmpeg download.
+  Adds `SQUEAKSHOT_PORT` and `SQUEAKSHOT_PREFLIGHT_CLOCK_SKEW_MS` environment
+  variables (the former dodges macOS AirPlay on port 5000). Full detail in
+  [CHANGELOG.md](CHANGELOG.md).
+- **Isolated install** — The desktop controller installs into a conda/mamba
+  environment (`environment.yml`) that also bundles FFmpeg, so nothing touches
+  your system Python and there is no separate FFmpeg download.
 - **Deploy settings from the GUI** — The Settings tab can push camera
   resolution/fps/bitrate to every Pi and restart the record service, instead
   of re-running `install.sh`.
-- Inline pre-flight results, per-camera preview reload, and assorted bug
-  fixes (see `CHANGELOG.md`).
+- Inline pre-flight results, per-camera preview reload, parallel encode /
+  sync / trim, and assorted bug fixes (see `CHANGELOG.md`).
 
 ## Hardware
 
-- Two or more Raspberry Pi 4 / 5, each with a Camera Module 3 (Wide recommended)
+- Two or more Raspberry Pi 4 / 5 running Raspberry Pi OS Bookworm (64-bit)
+- A Camera Module 3 (IMX708, Wide variant recommended) on each Pi
 - Wired Ethernet between every Pi and the desktop running the controller
-- A desktop (Windows / macOS / Linux) for the controller
+  (Wi-Fi works but degrades preview latency and pre-flight clock-skew margin)
+- A desktop (Windows / macOS / Linux) for the controller — modest CPU is fine,
+  the heavy lifting is FFmpeg encode/sync on a small number of camera streams
 
 ## Installation
 
@@ -65,15 +77,19 @@ See [INSTALL.md](INSTALL.md) for the full walkthrough. The short version:
 
 **On each Raspberry Pi** — Raspberry Pi OS Bookworm (64-bit), a working Camera
 Module 3, SSH enabled, and `python3-picamera2` + `python3-av` installed (both
-ship on standard images).
+ship on standard Bookworm images). On the Pi 5 specifically, `python3-av` is
+not optional — without it the recorder falls back to the V4L2 H.264 path,
+which has produced 0-byte `.h264` files on some libcamera builds.
 
 **On the desktop** — conda or mamba (recommended, e.g. via Miniforge). The
 controller's Python, Flask, NumPy, and FFmpeg all come from the
 `environment.yml` conda environment. Without conda you instead need Python
-3.10+ and FFmpeg/FFprobe on `PATH` yourself.
+3.10+ and FFmpeg/FFprobe on `PATH` yourself (the launcher will pip-install
+Flask + NumPy in that case).
 
 You also need passwordless SSH from the desktop to every Pi
-(`ssh-copy-id user@pi-ip`).
+(`ssh-copy-id user@pi-ip`) and the Pis on NTP / chrony so their wall clocks
+agree to within ~100 ms (pre-flight check enforces this).
 
 ### 1. Configure
 
@@ -150,35 +166,45 @@ All cameras share a wall-clock reference, so keep the Pis on NTP / chrony. On
 *Start Recording* the server schedules a precise start time about 3 seconds in
 the future, sends it to every client, waits for ACKs, then everyone busy-waits
 to that exact instant before opening their encoder. The `.pts` sidecar next to
-each `.h264` records a microsecond timestamp per frame; the Sync stage uses
-those timestamps to match frames across cameras offline, within a 20 ms
-tolerance.
+each `.h264` records a microsecond timestamp per frame (written by
+`TimestampingFileOutput`, a `FileOutput` subclass — `picamera2`'s built-in
+`pts=` kwarg is silently ignored on the libav path used by the Pi 5). The
+Sync stage uses those timestamps to match frames across cameras offline,
+within a 20 ms tolerance.
 
-The pre-flight check flags any Pi whose clock is off by more than ~100 ms,
-since skew directly degrades sync quality.
+Heartbeats keep the cluster honest: the server sends `PING` every 10 s during
+recording; any client that hears nothing for 30 s auto-stops, so a crashed
+server doesn't quietly fill SD cards.
+
+The pre-flight check flags any Pi whose clock is off by more than ~100 ms
+(tunable via `SQUEAKSHOT_PREFLIGHT_CLOCK_SKEW_MS`), since skew directly
+degrades sync quality.
 
 ## Output
 
 - **Raw on Pi**: `~/camera_videos/<camN>_<animal>_<project>.{h264,pts}`
+- **Raw pulled to desktop**: `~/SqueakShot_Videos/raw/*.{h264,pts}`
 - **Encoded locally**: `~/SqueakShot_Videos/encoded/*.mp4`
 - **Synced** (frame-matched across cameras): `~/SqueakShot_Videos/synced/*.mp4`
 - **Trimmed** (final clipped clips): `~/SqueakShot_Videos/trimmed/*.mp4`
 
 ## Settings that matter
 
-- `output_width` × `output_height`: actual recorded resolution
+- `output_width` × `output_height`: actual recorded resolution (default 1536×864)
 - `sensor_width` × `sensor_height`: leave at 2304×1296 to keep full lens FOV
 - `framerate`: 56 fps is the maximum for the binned 2304×1296 sensor mode
+  on the IMX708
 - `bitrate_mbps`: 25 is plenty for 1536×864; raise for full-res
 
 The ISP downscale trick: the camera reads the same 2304×1296 binned sensor
-mode (full FOV) regardless of `output_width`/`output_height`, and the ISP
-scales down before the encoder sees it. So lowering `output_*` reduces
+mode (full FOV) regardless of `output_width`/`output_height`, and the IMX708
+ISP scales down before the encoder sees it. So lowering `output_*` reduces
 encoder load and bandwidth, but keeps the lens view.
 
 Changing these in the **Settings** tab updates the controller's config; click
 **Deploy to Pis** there to copy them to every camera and restart the record
-service so they take effect.
+service so they take effect. This is the same operation as re-running
+`pi-deploy/install.sh`, but in-place from the GUI.
 
 ## Files
 
@@ -197,11 +223,14 @@ SqueakShot/
 │   ├── sync_capture.py               # capture service (multi-client server / client)
 │   ├── camera_preview.py             # MJPEG preview server
 │   ├── install.sh                    # deploys to every camera in config
+│   ├── README.md                     # Pi-side files reference + manual deploy notes
 │   └── services/
 │       ├── squeakshot-record.service.template
 │       └── squeakshot-preview.service.template
 ├── tools/
 │   └── sync_videos.py                # standalone offline sync tool (GUI + CLI)
+│                                     # — usable without the controller, e.g. for
+│                                     # post-hoc resync of older recordings
 ├── docs/
 │   └── SqueakShotIcon2.png           # project logo (README header + controller UI)
 ├── INSTALL.md                        # full installation walkthrough
