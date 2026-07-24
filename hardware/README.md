@@ -35,4 +35,6 @@ Editable Autodesk Fusion 360 files.
 | `cad/LeftSide.f3d`, `cad/RightSide.f3d` | Housing side panels |
 | `cad/LeftStand.f3d`, `cad/RightStand.f3d` | Housing stands |
 | `cad/Lid_Recording.f3d` | Housing lid |
-| `cad/raspi_case/Case_with_Supports.f3d`, `Lid.f3d`, `Buttons.f3d` | Pi case parts |
+| `cad/raspi_case/Case_with_Supports.f3d` | Pi case body |
+| `cad/raspi_case/Lid.f3d` | Pi case lid |
+| `cad/raspi_case/Buttons.f3d` | Pi case buttons |
