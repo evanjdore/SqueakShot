@@ -7,3 +7,5 @@
 *.png binary
 *.jpg binary
 *.zip binary
+*.f3d filter=lfs diff=lfs merge=lfs -text
+*.3mf filter=lfs diff=lfs merge=lfs -text

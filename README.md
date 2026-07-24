@@ -69,6 +69,11 @@ throttling status per camera, and an in-GUI settings deploy round it out.
 - A desktop (Windows / macOS / Linux) for the controller — modest CPU is fine,
   the heavy lifting is FFmpeg encode/sync on a small number of camera streams
 
+For the reference physical rig — a 3D-printed three-camera enclosure built
+around a single mouse cage — see the **[hardware build guide](BUILD.md)**. It
+covers the full bill of materials, dimensions, wiring, and assembly, and the
+printable `.3mf` / editable `.f3d` files live in [`hardware/`](hardware/).
+
 ## Installation
 
 See [INSTALL.md](INSTALL.md) for the full walkthrough. The short version:
@@ -231,8 +236,14 @@ SqueakShot/
 │   └── sync_videos.py                # standalone offline sync tool (GUI + CLI)
 │                                     # — usable without the controller, e.g. for
 │                                     # post-hoc resync of older recordings
+├── hardware/                         # 3D-print + CAD files for the physical rig
+│   ├── print/                        # print-ready .3mf (housing + Pi case)
+│   ├── cad/                          # editable Fusion 360 .f3d sources
+│   └── README.md                     # hardware file index
 ├── docs/
-│   └── SqueakShotIcon2.png           # project logo (README header + controller UI)
+│   ├── SqueakShotIcon2.png           # project logo (README header + controller UI)
+│   └── images/                       # build-guide renders
+├── BUILD.md                          # hardware build guide (BOM, dimensions, assembly)
 ├── INSTALL.md                        # full installation walkthrough
 ├── QUICKSTART.md                     # day-to-day usage
 ├── DEPLOYMENT_HISTORY.md             # field notes
