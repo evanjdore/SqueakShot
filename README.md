@@ -275,3 +275,6 @@ throttling, SD card too slow.
 **Settings changes don't take effect.** Editing settings in the GUI only
 updates the controller's config. Use **Deploy to Pis** on the Settings tab (or
 re-run `pi-deploy/install.sh`) to push them to the cameras.
+
+# Lab
+This project was funded by the Maiya Lab at LSUHSC New Orleans
